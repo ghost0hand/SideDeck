@@ -10,10 +10,12 @@
 - 上下 / 左摇杆选择，A 打开，B 返回，LB / RB 切换标签。
 - 阅读时用右摇杆滚动，X 回到顶部。
 - 「工具 → 外观主题」提供冰川玻璃、暮紫玻璃、烟灰玻璃、浅色磨砂。
-- 支持 Steam / Epic 扫描以及手动添加应用。
+- 支持 Steam / Epic 扫描；「工具 → 批量添加游戏」或托盘同名菜单支持 Ctrl / Shift 多选 exe、lnk、url，也可一次拖入多个文件，重复路径会自动跳过。
 - 支持本地 Markdown、TXT 和 HTML 图鉴；将攻略放在程序旁的 guides 目录，也可将 HTML 放在程序目录。
 
 首次运行会生成本机 config.json 和使用说明。升级时退出托盘程序，再用新版本 SideDeck.exe 替换旧文件；保留现有 config.json、guides 和图片目录。
+
+呼出时 Deck 会接管前台焦点，游戏继续运行；关闭后等按键、扳机和摇杆松开，再把焦点还给原窗口。接管失败会取消呼出并提示；主动切到其他窗口时会收起 Deck，不抢回焦点。此方案依赖游戏遵守前台输入规则，持续读取后台手柄的游戏仍可能响应，未使用暂停进程、驱动或游戏注入。
 
 **仓库和 Release 仅包含程序及通用文档，不包含个人配置、游戏路径、私人攻略、服装图片或地图。**
 
@@ -25,6 +27,8 @@
 ./build.ps1                         # build/release/SideDeck.exe
 ./build.ps1 -Configuration Debug   # build/debug/SideDeck.exe
 ./test.ps1                         # 自包含的回归检查，不需要私人攻略
+./build.ps1 -Configuration FocusTest
+./build/tests/focus_integration.exe # 可选：用临时测试窗口验证跨进程焦点交接
 ```
 
 若没有本地工具链，将 g++.exe 加入 PATH，或设置环境变量 SIDEDECK_CXX 指向完整路径。版本从 VERSION 读取，自动写入程序与 Windows 版本资源。

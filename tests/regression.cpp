@@ -67,6 +67,23 @@ int main() {
         G::W = 621; G::H = 900; ensureDib(G::W, G::H);
         assert(gp::verticalDirection(1) == -1 && gp::verticalDirection(-1) == 1);
         assert(gp::Input::norm(32767) == 1 && gp::Input::norm(-32768) == -1);
+        gp::Pad neutral{}; assert(gp::isNeutral(neutral));
+        neutral.wButtons = gp::B; assert(!gp::isNeutral(neutral));
+        neutral = {}; neutral.sThumbRY = 10000; assert(!gp::isNeutral(neutral));
+        neutral = {}; neutral.sThumbLY = -10000; assert(!gp::isNeutral(neutral));
+        neutral = {}; neutral.bLeftTrigger = 31; assert(!gp::isNeutral(neutral));
+        neutral = {}; neutral.sThumbRX = -8000; assert(gp::isNeutral(neutral));
+        std::filesystem::create_directories(root + L"/import-fixtures/目录.exe");
+        auto first = root + L"/import-fixtures/游戏 甲.exe";
+        auto second = root + L"/import-fixtures/游戏 乙.EXE";
+        auto shortcut = root + L"/import-fixtures/快捷方式.lnk";
+        writeText(first, "test fixture; never executed"); writeText(second, "test fixture; never executed"); writeText(shortcut, "test fixture; never executed");
+        lib::Config imported; lib::Item existing; existing.target = first; imported.manual.push_back(existing);
+        auto batch = lib::addManualFiles(imported, {lib::toLowerCp(first), second, shortcut, shortcut, root + L"/import-fixtures/目录.exe", root + L"/readme.txt", root + L"/absent.exe"});
+        assert(batch.added == 2 && batch.duplicates == 2 && batch.unsupported == 1 && batch.missing == 2);
+        assert(imported.manual.size() == 3 && lib::manualPathKey(imported.manual[0].target) == lib::manualPathKey(second) && lib::manualPathKey(imported.manual[1].target) == lib::manualPathKey(shortcut));
+        auto repeated = lib::addManualFiles(imported, {first, second, shortcut});
+        assert(repeated.added == 0 && repeated.duplicates == 3 && imported.manual.size() == 3);
         auto image = G::imageCache.get(root + L"/landscape.png", 0);
         assert(image && image->GetWidth() == 512 && image->GetHeight() == 288);
         auto thumbnail = G::iconCache.get(root + L"/portrait.png", -48);
@@ -80,7 +97,7 @@ int main() {
             item.target = root + L"/guides/demo.md"; G::tabs[0].items.push_back(item);
         }
         snapshot(root + L"/list.png");
-        int rowY = (int)(HEADER_H + TAB_H + 8 + 2 * (ITEM_H + ITEM_GAP) + 20);
+        int rowY = (int)(listTop() + 2 * (ITEM_H + ITEM_GAP) + 20);
         G::dirty = false; WndProc(nullptr, WM_LBUTTONUP, 0, MAKELPARAM(80, rowY));
         assert(G::sel[0] == 2 && G::dirty);
         WndProc(nullptr, WM_LBUTTONUP, 0, MAKELPARAM(80, G::H - 10)); assert(G::sel[0] == 2);
@@ -120,6 +137,9 @@ int main() {
             G::cfg.theme = i; ui::theme() = ui::themePreset(i); G::focusReady = G::pillReady = false;
             snapshot(root + L"/theme-" + std::to_wstring(i) + L".png");
         }
+        G::cfg.scale = 1.8f; ui::g_textScale = G::cfg.scale;
+        G::focusReady = G::pillReady = false; G::sel[2] = 0; G::scroll[2] = 0;
+        snapshot(root + L"/tools-large.png");
         writeText(lib::configPath(), R"({"theme":999,"scale":-8,"width":0,"margin":-3})");
         lib::Config bounds; lib::loadConfig(bounds);
         assert(bounds.theme == 3 && bounds.scale == 0.75f && bounds.width == 320 && bounds.margin == 0);
@@ -128,5 +148,5 @@ int main() {
         G::iconCache.clear(); G::imageCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: synthetic HTML/Markdown, image sizing, dynamic tabs, mouse navigation, reader state, four themes, persistence, transparency/clipping, frame-independent motion and cleanup");
+    puts("PASS: synthetic guides, image sizing, batch imports/order/duplicates/validation, neutral controller handoff, tabs, mouse navigation, themes, transparency, motion and cleanup");
 }

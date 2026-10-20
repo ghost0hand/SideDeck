@@ -25,6 +25,12 @@ struct State {
     DWORD dwPacketNumber;
     Pad   Gamepad;
 };
+inline bool isNeutral(const Pad& pad) {
+    const int deadzone = 9175;
+    return pad.wButtons == 0 && pad.bLeftTrigger <= 30 && pad.bRightTrigger <= 30 &&
+        abs((int)pad.sThumbLX) <= deadzone && abs((int)pad.sThumbLY) <= deadzone &&
+        abs((int)pad.sThumbRX) <= deadzone && abs((int)pad.sThumbRY) <= deadzone;
+}
 struct Battery {
     BYTE BatteryType;
     BYTE BatteryLevel;

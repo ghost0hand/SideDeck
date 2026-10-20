@@ -29,6 +29,7 @@
 #include "render.hpp"
 #include "gamepad.hpp"
 #include "library.hpp"
+#include "focus_guard.hpp"
 
 using namespace Gdiplus;
 using lib::Item;
@@ -78,6 +79,9 @@ WORD recordedMask = 0;
 bool recordArmed = false;
 bool waitForRelease = false;
 HWND foregroundAtShow = nullptr;
+HWND lastExternalForeground = nullptr;
+focusguard::Guard inputFocus;
+bool restoreOnClose = false, waitingForRelease = false, padNeutral = true, dialogOpen = false;
 std::vector<RectF> tabRects;
 int htmlTabIndex = -1;
 std::wstring toastMsg;
@@ -195,30 +199,35 @@ static void ensureDib(int w, int h) {
 
 static void showPanel();
 static void tickGamepad();
-static void hidePanel();
+static void hidePanel(bool restoreFocus = true);
 static void rebuildTabs();
 static void saveCfg();
 static void applyTheme(int id);
+static void importGames();
 
 // ==================== 绘制 ====================
 // UI 缩放：手持设备/电视串流场景整体放大
 static float S() { return G::cfg.scale; }
 #define PADX     (20.0f * S())
-#define HEADER_H (66.0f * S())
+#define HEADER_H (80.0f * S())
 #define TAB_H    (46.0f * S())
 #define FOOTER_H (48.0f * S())
-#define ITEM_H   (64.0f * S())
-#define ITEM_GAP (8.0f * S())
+#define ITEM_H   (72.0f * S())
+#define ITEM_GAP (10.0f * S())
+
+static float listTop() { return HEADER_H + TAB_H + 12 * S(); }
+static float listBottom() { return G::H - FOOTER_H - 10 * S(); }
 
 static void drawItemCard(Graphics& g, const Item& it, float x, float y, float w, float h, bool selected, float appear) {
     auto& T = ui::theme();
-    float pad = 8.0f * S();
+    float pad = 12.0f * S();
     float iconS = h - pad * 2;
     float ix = x + pad, iy = y + pad;
     ui::ToolGlyph glyph = ui::ToolGlyph::None;
     if (it.kind == lib::Command) {
         if (it.target == L"__theme__") glyph = ui::ToolGlyph::Settings;
         else if (it.target == L"__hotkey__") glyph = ui::ToolGlyph::Gamepad;
+        else if (it.target == L"__addgames__") glyph = ui::ToolGlyph::Folder;
         else if (it.target == L"__rescan__") glyph = ui::ToolGlyph::Refresh;
         else if (it.target == L"__opendir__") glyph = ui::ToolGlyph::Folder;
         else if (it.target == L"__openguides__") glyph = ui::ToolGlyph::Book;
@@ -264,20 +273,20 @@ static void drawReader(Graphics& g, float w, float h) {
     float top = HEADER_H;
     // 标题栏
     ui::TextStyle tt; tt.size = 17; tt.bold = true; tt.color = T.text;
-    ui::drawText(g, G::readerTitle, PADX, 14 * S(), w - PADX * 2, 34 * S(), tt);
+    ui::drawText(g, G::readerTitle, PADX, 18 * S(), w - PADX * 2, 40 * S(), tt);
     ui::fillRoundRect(g, T.chip, PADX, top - 6, 90 * S(), 22 * S(), 11);
     ui::TextStyle bt; bt.size = 11.5f; bt.color = T.textDim;
     bt.halign = StringAlignmentCenter;
     ui::drawText(g, L"← B 返回", PADX, top - 6, 90 * S(), 22 * S(), bt);
 
     // 内容区裁剪
-    RectF clip(PADX * 0.5f, top + 24 * S(), w - PADX, h - top - 24 * S() - FOOTER_H);
+    RectF clip(PADX * 0.5f, top + 32 * S(), w - PADX, h - top - 32 * S() - FOOTER_H);
     ui::fillRoundRect(g, T.reader, clip.X, clip.Y - 3 * S(), clip.Width, clip.Height + 3 * S(), 18 * S());
     auto saved = g.Save();
     g.SetClip(clip, CombineModeIntersect);
     g.TranslateTransform(0, (1 - ui::easeOutCubic(G::pageAnim)) * 10 * S());
     auto& imgCache = G::imageCache;
-    float y = clip.Y - G::readerScroll;
+    float y = clip.Y + 8 * S() - G::readerScroll;
     float cw = clip.Width - PADX;
     for (auto& m : g_doc) {
         if (m.type == MD_SPACER) { y += m.size; continue; }
@@ -376,6 +385,12 @@ static void drawThemePicker(Graphics& g) {
 static void drawPanel(Graphics& g) {
     auto& T = ui::theme();
     float w = (float)G::W, h = (float)G::H;
+    if (G::waitingForRelease) {
+        ui::fillRoundRect(g, T.panelTop.withA(245), PADX, h - 110 * S(), w - PADX * 2, 46 * S(), 14 * S());
+        ui::TextStyle hint; hint.size = 12; hint.halign = StringAlignmentCenter;
+        ui::drawText(g, L"松开按键与摇杆，即返回游戏", PADX, h - 110 * S(), w - PADX * 2, 46 * S(), hint);
+        return;
+    }
 
     // 半透明模糊采样 + 分层玻璃色；保留真实的窗口透明度。
     auto glassState = g.Save();
@@ -399,9 +414,9 @@ static void drawPanel(Graphics& g) {
     // ---- 顶部 ----
     if (G::view == 0) {
         ui::TextStyle logo; logo.size = 13; logo.bold = true; logo.color = T.text;
-        ui::drawText(g, L"SIDEDECK", PADX + 4 * S(), 13 * S(), 170 * S(), 25 * S(), logo);
+        ui::drawText(g, L"SIDEDECK", PADX + 4 * S(), 18 * S(), 170 * S(), 28 * S(), logo);
         ui::TextStyle label; label.size = 9.5f; label.color = T.textDim;
-        ui::drawText(g, std::wstring(L"v") + SIDEDECK_VERSION_W + L" · " + ui::themeName(G::cfg.theme), PADX + 4 * S(), 38 * S(), 200 * S(), 18 * S(), label);
+        ui::drawText(g, std::wstring(L"v") + SIDEDECK_VERSION_W + L" · " + ui::themeName(G::cfg.theme), PADX + 4 * S(), 46 * S(), 200 * S(), 20 * S(), label);
     }
     // 右侧：手柄状态
     std::wstring status;
@@ -410,7 +425,7 @@ static void drawPanel(Graphics& g) {
     } else status = L"未检测到手柄";
     ui::TextStyle st; st.size = 11; st.color = G::padCount > 0 ? T.textDim : T.textFaint;
     st.halign = StringAlignmentFar;
-    if (G::view == 0) ui::drawText(g, status, w - PADX - 185 * S(), 17 * S(), 180 * S(), 26 * S(), st);
+    if (G::view == 0) ui::drawText(g, status, w - PADX - 185 * S(), 20 * S(), 180 * S(), 28 * S(), st);
 
     if (G::view == 1) {
         drawReader(g, w, h);
@@ -432,7 +447,7 @@ static void drawPanel(Graphics& g) {
         else tx -= std::max(0.0f, selectedRight - (w - PADX));
         G::tabRects.clear();
         auto tabClip = g.Save();
-        g.SetClip(RectF(PADX, ty, w - PADX * 2, TAB_H), CombineModeIntersect);
+        g.SetClip(RectF(PADX - 2 * S(), ty - 6 * S(), w - PADX * 2 + 4 * S(), TAB_H + 8 * S()), CombineModeIntersect);
         float tabX = tx;
         for (size_t i = 0; i < G::tabs.size(); ++i) {
             G::tabRects.emplace_back(tabX, ty, tabWidths[i], 34 * S());
@@ -455,8 +470,8 @@ static void drawPanel(Graphics& g) {
 
         // ---- 列表 ----
         auto& items = G::tabs[G::tabIndex].items;
-        float listTop = HEADER_H + TAB_H + 8;
-        float listH = h - listTop - FOOTER_H - 6;
+        float listTop = ::listTop();
+        float listH = listBottom() - listTop;
         RectF clip(0, listTop, w, listH);
         auto saved = g.Save();
         g.SetClip(clip, CombineModeIntersect);
@@ -475,9 +490,9 @@ static void drawPanel(Graphics& g) {
         if (!items.empty()) {
             float fx = PADX - 3 * S() + pageOffset, fw = w - PADX * 2 + 6 * S();
             LinearGradientBrush focus(PointF(fx, G::focusY), PointF(fx + fw, G::focusY + ITEM_H), T.selBg.gd(), T.selBg.withA((BYTE)(T.selBg.a * 0.45f)).gd());
-            GraphicsPath card; ui::roundRectPath(card, fx, G::focusY - 2 * S(), fw, ITEM_H + 4 * S(), 16 * S());
+            GraphicsPath card; ui::roundRectPath(card, fx, G::focusY + S(), fw, ITEM_H - 2 * S(), 16 * S());
             g.FillPath(&focus, &card);
-            ui::drawRoundRect(g, T.sep, fx, G::focusY - 2 * S(), fw, ITEM_H + 4 * S(), 16 * S());
+            ui::drawRoundRect(g, T.sep, fx, G::focusY + S(), fw, ITEM_H - 2 * S(), 16 * S());
         }
         int first = std::max(0, (int)(G::scroll[G::tabIndex] / step) - 1);
         int last = std::min((int)items.size(), (int)((G::scroll[G::tabIndex] + listH) / step) + 2);
@@ -557,7 +572,7 @@ static void renderFrame() {
         g.SetSmoothingMode(SmoothingModeHighQuality);
         g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         g.SetPixelOffsetMode(PixelOffsetModeHalf);
-        float entrance = ui::easeOutCubic(G::anim);
+        float entrance = G::waitingForRelease ? 1 : ui::easeOutCubic(G::anim);
         g.TranslateTransform((1 - entrance) * 26 * S() * (G::cfg.edge == 1 ? -1 : 1), 0);
         drawPanel(g);
     }
@@ -565,7 +580,7 @@ static void renderFrame() {
     POINT pt{ G::PX, G::PY };
     SIZE sz{ G::W, G::H };
     POINT src{ 0, 0 };
-    BLENDFUNCTION bf{ AC_SRC_OVER, 0, (BYTE)(255 * ui::easeOutCubic(G::anim)), AC_SRC_ALPHA };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, (BYTE)(G::waitingForRelease ? 255 : 255 * ui::easeOutCubic(G::anim)), AC_SRC_ALPHA };
     BOOL ulwok = UpdateLayeredWindow(G::hwnd, scr, &pt, &sz, G::hdcMem, &src, 0, &bf, ULW_ALPHA);
 #ifdef DEBUG_LOG
     {
@@ -605,14 +620,19 @@ static void computeGeometry() {
 }
 
 static void showPanel() {
-    if (G::visible) { G::closing = false; return; }
+    if (G::visible) { G::closing = false; G::waitingForRelease = false; G::waitForRelease = true; return; }
+    HWND previous = GetForegroundWindow();
+    DWORD previousProcess = 0;
+    if (previous) GetWindowThreadProcessId(previous, &previousProcess);
+    if (previousProcess == GetCurrentProcessId()) previous = G::lastExternalForeground;
+    G::foregroundAtShow = previous;
     computeGeometry();
     ensureDib(G::W, G::H);
     refreshBackdrop();
     G::visible = true;
     G::closing = false;
     G::waitForRelease = true;
-    G::foregroundAtShow = GetForegroundWindow();
+    G::restoreOnClose = false; G::waitingForRelease = false;
     G::anim = 0.0f;
     G::animTick = GetTickCount64();
     G::focusReady = false; G::pillReady = false;
@@ -631,14 +651,30 @@ static void showPanel() {
             SendInput(2, in, sizeof(INPUT));
         }
     }
-    SetWindowPos(G::hwnd, HWND_TOPMOST, G::PX, G::PY, G::W, G::H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    ShowWindow(G::hwnd, SW_SHOWNOACTIVATE);
+    SetWindowPos(G::hwnd, HWND_TOPMOST, G::PX, G::PY, G::W, G::H, SWP_SHOWWINDOW);
+    ShowWindow(G::hwnd, SW_SHOW);
+    if (!G::inputFocus.acquire(G::hwnd, previous)) {
+        G::visible = false; G::closing = false;
+        G::inputFocus.release(false);
+        ShowWindow(G::hwnd, SW_HIDE);
+        delete G::backdrop; G::backdrop = nullptr;
+        if (G::trayAdded) {
+            G::nid.uFlags = NIF_INFO;
+            wcscpy_s(G::nid.szInfoTitle, L"SideDeck 未能接管输入");
+            wcscpy_s(G::nid.szInfo, L"为避免误操作游戏，已取消呼出。请点击托盘显示面板后重试。");
+            G::nid.dwInfoFlags = NIIF_WARNING;
+            Shell_NotifyIconW(NIM_MODIFY, &G::nid);
+            G::nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        }
+        return;
+    }
     renderFrame();
 }
 
-static void hidePanel() {
+static void hidePanel(bool restoreFocus) {
     if (!G::visible) return;
     G::closing = true;
+    G::restoreOnClose = restoreFocus && G::inputFocus.ownsForeground();
     G::themePicker = false;
     G::captureHotkey = false;
     G::recordedMask = 0; G::recordArmed = false;
@@ -685,6 +721,9 @@ static void rebuildTabs() {
     Item hk; hk.title = L"呼出组合键"; hk.subtitle = L"当前：" + gp::Input::buttonNames((WORD)G::cfg.hotkeyMask);
     hk.target = L"__hotkey__"; hk.kind = lib::Command;
     tools.items.push_back(hk);
+    Item add; add.title = L"批量添加游戏"; add.subtitle = L"支持 Ctrl / Shift 多选，也可一次拖入多个文件";
+    add.target = L"__addgames__"; add.kind = lib::Command;
+    tools.items.push_back(add);
     Item sc; sc.title = L"重新扫描游戏"; sc.subtitle = L"Steam / Epic"; sc.target = L"__rescan__"; sc.kind = lib::Command;
     tools.items.push_back(sc);
     Item dir; dir.title = L"打开程序目录"; dir.subtitle = lib::appDir(); dir.target = L"__opendir__"; dir.kind = lib::Command;
@@ -725,6 +764,27 @@ static void applyTheme(int id) {
     }
     G::themePicker = false;
     saveCfg(); toast(std::wstring(L"外观已切换 · ") + ui::themeName(id));
+}
+
+static void addGames(const std::vector<std::wstring>& paths) {
+    auto result = lib::addManualFiles(G::cfg, paths);
+    if (result.added) { saveCfg(); rebuildTabs(); G::tabIndex = 0; G::sel[0] = 0; }
+    int skipped = result.duplicates + result.unsupported + result.missing;
+    std::wstring message = L"已添加 " + std::to_wstring(result.added) + L" 个游戏";
+    if (result.duplicates) message += L" · 重复 " + std::to_wstring(result.duplicates);
+    if (skipped > result.duplicates) message += L" · 无效 " + std::to_wstring(skipped - result.duplicates);
+    toast(message);
+}
+
+static void importGames() {
+    if (G::dialogOpen) return;
+    G::dialogOpen = true;
+    std::vector<std::wstring> paths;
+    HRESULT result = lib::chooseGameFiles(G::hwnd, paths);
+    G::dialogOpen = false;
+    G::waitForRelease = true;
+    if (SUCCEEDED(result) && !paths.empty()) addGames(paths);
+    else if (FAILED(result) && result != HRESULT_FROM_WIN32(ERROR_CANCELLED)) toast(L"无法打开文件选择器，请重试或直接拖入文件");
 }
 
 // ==================== 动作 ====================
@@ -789,6 +849,7 @@ static void openSelected() {
         G::dirty = true; return;
     }
     if (it.target == L"__rescan__") { rescan(); return; }
+    if (it.target == L"__addgames__") { importGames(); return; }
     if (it.target == L"__opendir__") { ShellExecuteW(nullptr, L"open", lib::appDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); return; }
     if (it.target == L"__openguides__") {
         std::wstring d = lib::guidesDir();
@@ -860,9 +921,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 break;
             }
             // 命中测试列表项
-            float listTop = HEADER_H + TAB_H + 8;
+            float listTop = ::listTop();
             float step = ITEM_H + ITEM_GAP;
-            if (y >= listTop && y < G::H - FOOTER_H - 6 && G::tabIndex < (int)G::tabs.size()) {
+            if (y >= listTop && y < listBottom() && G::tabIndex < (int)G::tabs.size()) {
+                float rowOffset = fmodf(y - listTop + G::scroll[G::tabIndex], step);
+                if (rowOffset >= ITEM_H) break;
                 int idx = (int)((y - listTop + G::scroll[G::tabIndex]) / step);
                 auto& items = G::tabs[G::tabIndex].items;
                 if (idx >= 0 && idx < (int)items.size()) {
@@ -881,27 +944,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         case WM_DROPFILES: {
             HDROP hd = (HDROP)wp;
-            wchar_t buf[MAX_PATH]{};
+            std::vector<std::wstring> paths;
             UINT n = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
             for (UINT i = 0; i < n; i++) {
-                if (DragQueryFileW(hd, i, buf, MAX_PATH)) {
-                    std::wstring p(buf);
-                    Item it;
-                    auto pos = p.find_last_of(L"\\/");
-                    std::wstring fn = pos == std::wstring::npos ? p : p.substr(pos + 1);
-                    auto dot = fn.rfind(L'.');
-                    if (dot != std::wstring::npos) fn = fn.substr(0, dot);
-                    it.title = fn;
-                    it.subtitle = p;
-                    it.target = p;
-                    it.kind = lib::App;
-                    G::cfg.manual.insert(G::cfg.manual.begin(), it);
-                }
+                UINT length = DragQueryFileW(hd, i, nullptr, 0);
+                std::vector<wchar_t> buffer(length + 1);
+                if (DragQueryFileW(hd, i, buffer.data(), (UINT)buffer.size())) paths.emplace_back(buffer.data());
             }
             DragFinish(hd);
-            saveCfg();
-            rebuildTabs();
-            toast(L"已添加 " + std::to_wstring(n) + L" 项");
+            addGames(paths);
             break;
         }
         case WM_MOUSEWHEEL: {
@@ -915,6 +966,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         }
         case WM_KEYDOWN: {
+            if (G::closing || G::dialogOpen) break;
             if (G::captureHotkey) {
                 if (wp == VK_ESCAPE) { G::captureHotkey = false; G::recordedMask = 0; G::recordArmed = false; G::dirty = true; }
                 break;
@@ -943,29 +995,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 case 1002: hidePanel(); break;
                 case 1003: rescan(); break;
                 case 1004: ShellExecuteW(nullptr, L"open", lib::appDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
-                case 1005: {
-                    OPENFILENAMEW ofn{};
-                    wchar_t file[MAX_PATH]{};
-                    ofn.lStructSize = sizeof(ofn);
-                    ofn.hwndOwner = nullptr;
-                    ofn.lpstrFile = file;
-                    ofn.nMaxFile = MAX_PATH;
-                    ofn.lpstrFilter = L"可执行文件\0*.exe\0快捷方式\0*.lnk\0所有文件\0*.*\0";
-                    ofn.Flags = OFN_FILEMUSTEXIST | OFN_EXPLORER;
-                    if (GetOpenFileNameW(&ofn)) {
-                        std::wstring p(file);
-                        Item it;
-                        auto pos = p.find_last_of(L"\\/");
-                        std::wstring fn = pos == std::wstring::npos ? p : p.substr(pos + 1);
-                        auto dot = fn.rfind(L'.');
-                        if (dot != std::wstring::npos) fn = fn.substr(0, dot);
-                        it.title = fn; it.subtitle = p; it.target = p; it.kind = lib::App;
-                        G::cfg.manual.insert(G::cfg.manual.begin(), it);
-                        saveCfg(); rebuildTabs();
-                        toast(L"已添加：" + it.title);
-                    }
-                    break;
-                }
+                case 1005: importGames(); break;
                 case 1006: PostQuitMessage(0); break;
                 case 1007: {
                     ShellExecuteW(nullptr, L"open", lib::configPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -1091,7 +1121,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     LOG("class ok");
     computeGeometry();
     G::hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_ACCEPTFILES,
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES,
         L"SideDeckOverlay", L"SideDeck", WS_POPUP,
         G::PX, G::PY, G::W, G::H, nullptr, nullptr, hInstance, nullptr);
     if (!G::hwnd) { LOG("CREATEWINDOW FAILED"); return 1; }
@@ -1149,7 +1179,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         AppendMenuW(G::hTrayMenu, MF_STRING, 1001, L"显示面板");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1002, L"收起面板");
         AppendMenuW(G::hTrayMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1005, L"添加游戏…");
+        AppendMenuW(G::hTrayMenu, MF_STRING, 1005, L"批量添加游戏…");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1003, L"重新扫描游戏库");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1004, L"打开程序目录");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1007, L"编辑配置");
@@ -1170,6 +1200,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     if (G::trayAdded) Shell_NotifyIconW(NIM_DELETE, &G::nid);
+    G::inputFocus.release(true);
     KillTimer(G::hwnd, 1);
     UnregisterHotKey(G::hwnd, 1);
     DestroyWindow(G::hwnd);
@@ -1195,6 +1226,15 @@ static void tickAnim(float elapsed = -1) {
     if (G::closing) {
         G::anim = std::max(0.0f, G::anim - dt / 0.18f);
         if (G::anim <= 0) {
+            bool restore = G::restoreOnClose && G::inputFocus.ownsForeground();
+            if (restore && (!G::padNeutral || !focusguard::keyboardNeutral())) {
+                G::waitingForRelease = true;
+                renderFrame();
+                return;
+            }
+            G::waitingForRelease = false;
+            G::inputFocus.release(restore);
+            G::restoreOnClose = false;
             G::visible = false; G::closing = false;
             ShowWindow(G::hwnd, SW_HIDE);
             delete G::backdrop; G::backdrop = nullptr;
@@ -1227,16 +1267,26 @@ static void tickAnim(float elapsed = -1) {
 
 static void tickGamepad() {
     using gp::Btn;
-    if (G::visible && !G::closing && G::cfg.hideOnFocusLost) {
-        HWND foreground = GetForegroundWindow();
-        if (foreground && foreground != G::hwnd && foreground != G::foregroundAtShow) hidePanel();
-    }
-    if (G::closing) { tickAnim(); return; }
+    HWND foreground = GetForegroundWindow();
+    DWORD foregroundProcess = 0;
+    if (foreground) GetWindowThreadProcessId(foreground, &foregroundProcess);
+    if (!G::visible && foreground && foregroundProcess != GetCurrentProcessId()) G::lastExternalForeground = foreground;
     G::pad.poll();
     G::padCount = G::pad.count();
 
     int idx = -1;
     for (int i = 0; i < gp::MAX_PADS; i++) if (G::pad.connected(i)) { idx = i; break; }
+    G::padNeutral = true;
+    for (int i = 0; i < gp::MAX_PADS; ++i) {
+        if (G::pad.connected(i) && !gp::isNeutral(G::pad.state(i).Gamepad)) G::padNeutral = false;
+    }
+    if (G::closing || G::dialogOpen) {
+        G::prevBtn = G::curBtn = idx < 0 ? 0 : G::pad.buttons(idx);
+        tickAnim(); return;
+    }
+    if (G::visible && !G::inputFocus.ownsForeground()) {
+        hidePanel(false); tickAnim(); return;
+    }
 
     if (idx < 0) {
         G::prevBtn = 0; G::curBtn = 0; G::padCount = 0;
@@ -1313,7 +1363,7 @@ static void tickGamepad() {
         goBack();
         G::prevBtn = b; tickAnim(); return;
     }
-    if (pressed & Btn::A) openSelected();
+    if (pressed & Btn::A) { openSelected(); G::prevBtn = b; tickAnim(); return; }
     if (pressed & Btn::START) { hidePanel(); G::prevBtn = b; return; }
     if (pressed & Btn::LB) switchTab(-1);
     if (pressed & Btn::RB) switchTab(1);

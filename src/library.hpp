@@ -10,6 +10,8 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <set>
+#include <shobjidl.h>
 #include "json.hpp"
 #include "render.hpp"
 #include "html_guide.hpp"
@@ -136,6 +138,64 @@ inline std::wstring squeeze(std::wstring s) {
     std::wstring o;
     for (wchar_t c : s) if (c != L' ' && c != L'_' && c != L'-') o += c;
     return o;
+}
+
+struct ImportResult { int added = 0, duplicates = 0, unsupported = 0, missing = 0; };
+inline std::wstring manualPathKey(const std::wstring& path) {
+    std::error_code ec;
+    auto absolute = fs::absolute(fs::path(path), ec);
+    return toLowerCp((ec ? fs::path(path) : absolute).lexically_normal().wstring());
+}
+inline ImportResult addManualFiles(Config& config, const std::vector<std::wstring>& paths) {
+    ImportResult result;
+    std::set<std::wstring> existing;
+    for (auto& item : config.manual) existing.insert(manualPathKey(item.target));
+    std::vector<Item> added;
+    for (auto& path : paths) {
+        auto extension = toLowerCp(fs::path(path).extension().wstring());
+        if (extension != L".exe" && extension != L".lnk" && extension != L".url") { ++result.unsupported; continue; }
+        DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) { ++result.missing; continue; }
+        if (!existing.insert(manualPathKey(path)).second) { ++result.duplicates; continue; }
+        Item item; item.title = fs::path(path).stem().wstring();
+        item.target = fs::absolute(fs::path(path)).lexically_normal().wstring();
+        item.subtitle = item.target; item.kind = App;
+        added.push_back(item); ++result.added;
+    }
+    config.manual.insert(config.manual.begin(), added.begin(), added.end());
+    return result;
+}
+
+inline HRESULT chooseGameFiles(HWND owner, std::vector<std::wstring>& paths) {
+    IFileOpenDialog* dialog = nullptr;
+    HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+    if (FAILED(result)) return result;
+    DWORD options = 0;
+    result = dialog->GetOptions(&options);
+    if (SUCCEEDED(result)) result = dialog->SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+    const COMDLG_FILTERSPEC filters[] = {{L"游戏与快捷方式", L"*.exe;*.lnk;*.url"}, {L"可执行文件", L"*.exe"}, {L"快捷方式", L"*.lnk;*.url"}};
+    if (SUCCEEDED(result)) result = dialog->SetFileTypes(3, filters);
+    if (SUCCEEDED(result)) result = dialog->SetTitle(L"批量添加游戏 · Ctrl / Shift 多选");
+    if (SUCCEEDED(result)) result = dialog->Show(owner);
+    IShellItemArray* selection = nullptr;
+    if (SUCCEEDED(result)) result = dialog->GetResults(&selection);
+    if (selection) {
+        DWORD count = 0; result = selection->GetCount(&count);
+        for (DWORD i = 0; SUCCEEDED(result) && i < count; ++i) {
+            IShellItem* item = nullptr;
+            result = selection->GetItemAt(i, &item);
+            if (SUCCEEDED(result)) {
+                PWSTR path = nullptr;
+                result = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
+                if (SUCCEEDED(result) && path) paths.emplace_back(path);
+                CoTaskMemFree(path); item->Release();
+            }
+        }
+        selection->Release();
+    }
+    dialog->Release();
+    if (FAILED(result)) paths.clear();
+    return result;
 }
 inline std::wstring pickExe(const std::wstring& dir, const std::wstring& gameName, const std::wstring& installDir) {
     if (dir.empty()) return L"";

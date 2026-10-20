@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Release', 'Debug', 'Test')][string]$Configuration = 'Release',
+    [ValidateSet('Release', 'Debug', 'Test', 'FocusTest')][string]$Configuration = 'Release',
     [string]$Compiler = $env:SIDEDECK_CXX
 )
 $ErrorActionPreference = 'Stop'
@@ -23,14 +23,15 @@ $previousPath = $env:PATH
 $env:PATH = "$binDir;$previousPath"
 try {
 $generated = Join-Path $projectRoot 'build/generated'
-$relativeOutput = if ($Configuration -eq 'Test') { 'build/tests' } else { "build/$($Configuration.ToLowerInvariant())" }
+$relativeOutput = if ($Configuration -in @('Test', 'FocusTest')) { 'build/tests' } else { "build/$($Configuration.ToLowerInvariant())" }
 $outputDir = Join-Path $projectRoot $relativeOutput
 New-Item -ItemType Directory -Path $generated,$outputDir -Force | Out-Null
 $versionHeader = "#pragma once`n#define SIDEDECK_VERSION `"$version`"`n#define SIDEDECK_VERSION_W L`"$version`"`n#define SIDEDECK_VERSION_PARTS $versionParts`n"
 [IO.File]::WriteAllText((Join-Path $generated 'sidedeck_version.hpp'), $versionHeader, [Text.UTF8Encoding]::new($false))
 $arguments = @('-std=c++17', '-D_WIN32_WINNT=0x0A00', '-DUNICODE', '-D_UNICODE', '-static', '-static-libgcc', '-static-libstdc++', '-I', $generated)
-if ($Configuration -eq 'Test') {
-    $arguments += @('-O0', '-g', '-o', (Join-Path $outputDir 'regression.exe'), (Join-Path $projectRoot 'tests/regression.cpp'))
+if ($Configuration -in @('Test', 'FocusTest')) {
+    $testName = if ($Configuration -eq 'FocusTest') { 'focus_integration' } else { 'regression' }
+    $arguments += @('-O0', '-g', '-o', (Join-Path $outputDir "$testName.exe"), (Join-Path $projectRoot "tests/$testName.cpp"))
 } else {
     $resource = Join-Path $generated 'SideDeck.res.o'
     & (Join-Path $binDir 'windres.exe') '-I' $generated (Join-Path $projectRoot 'src/SideDeck.rc') '-O' 'coff' '-o' $resource
