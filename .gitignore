@@ -1,0 +1,27 @@
+# Personal data / local guide assets are not part of the source repository.
+/config.json
+/config.json.tmp
+/guides/
+/map_imgs/
+/suit_imgs/
+/*.html
+/toolchain/
+/backups/
+/build/
+/dist/
+/releases/
+/*.exe
+/*.dll
+/*.dmp
+/gdb*.txt
+/tests/local-*
+/tests/*.exe
+/tests/*.png
+/tests/*.gif
+/tests/config.json*
+/tests/guides/
+/tools/normalize_images.py
+__pycache__/
+*.pyc
+.vs/
+.idea/

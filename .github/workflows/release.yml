@@ -1,0 +1,35 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Test and package the tagged version
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $env:SIDEDECK_CXX = Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/g++.exe'
+          ./tools/release.ps1 -VerifyTag
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release create $tag "releases/$tag/SideDeck-$tag-win-x64.zip" "releases/$tag/SHA256SUMS.txt" --verify-tag --title "SideDeck $tag" --notes-file "releases/$tag/release-notes.md"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed.' }
