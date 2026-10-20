@@ -23,6 +23,7 @@ jobs:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $env:SIDEDECK_CXX = Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/g++.exe'
+          ./tools/prepare-installer-compiler.ps1
           ./tools/release.ps1 -VerifyTag
       - name: Publish GitHub Release
         shell: pwsh
@@ -31,5 +32,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          gh release create $tag "releases/$tag/SideDeck-$tag-win-x64.zip" "releases/$tag/SHA256SUMS.txt" --verify-tag --title "SideDeck $tag" --notes-file "releases/$tag/release-notes.md"
+          gh release create $tag "releases/$tag/SideDeck-$tag-win-x64.zip" "releases/$tag/SideDeck-$tag-Setup.exe" "releases/$tag/SHA256SUMS.txt" --verify-tag --title "SideDeck $tag" --notes-file "releases/$tag/release-notes.md"
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed.' }

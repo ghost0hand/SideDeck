@@ -30,6 +30,7 @@
 #include "gamepad.hpp"
 #include "library.hpp"
 #include "focus_guard.hpp"
+#include "input_bridge.hpp"
 
 using namespace Gdiplus;
 using lib::Item;
@@ -52,6 +53,7 @@ ui::IconCache iconCache, imageCache;
 HWND hwnd = nullptr;
 HINSTANCE hInst = nullptr;
 gp::Input pad;
+isolation::Bridge bridge;
 
 bool visible = false;
 bool closing = false;
@@ -204,6 +206,7 @@ static void rebuildTabs();
 static void saveCfg();
 static void applyTheme(int id);
 static void importGames();
+static void configureIsolation();
 
 // ==================== 绘制 ====================
 // UI 缩放：手持设备/电视串流场景整体放大
@@ -226,6 +229,7 @@ static void drawItemCard(Graphics& g, const Item& it, float x, float y, float w,
     ui::ToolGlyph glyph = ui::ToolGlyph::None;
     if (it.kind == lib::Command) {
         if (it.target == L"__theme__") glyph = ui::ToolGlyph::Settings;
+        else if (it.target == L"__isolation__") glyph = ui::ToolGlyph::Gamepad;
         else if (it.target == L"__hotkey__") glyph = ui::ToolGlyph::Gamepad;
         else if (it.target == L"__addgames__") glyph = ui::ToolGlyph::Folder;
         else if (it.target == L"__rescan__") glyph = ui::ToolGlyph::Refresh;
@@ -423,6 +427,7 @@ static void drawPanel(Graphics& g) {
     if (G::padCount > 0) {
         status = L"手柄已连接";
     } else status = L"未检测到手柄";
+    if(G::bridge.running()) status=G::bridge.fault() ? L"隔离等待 · 请检查手柄" : L"手柄隔离已启用";
     ui::TextStyle st; st.size = 11; st.color = G::padCount > 0 ? T.textDim : T.textFaint;
     st.halign = StringAlignmentFar;
     if (G::view == 0) ui::drawText(g, status, w - PADX - 185 * S(), 20 * S(), 180 * S(), 28 * S(), st);
@@ -620,6 +625,7 @@ static void computeGeometry() {
 }
 
 static void showPanel() {
+    G::bridge.block(true);
     if (G::visible) { G::closing = false; G::waitingForRelease = false; G::waitForRelease = true; return; }
     HWND previous = GetForegroundWindow();
     DWORD previousProcess = 0;
@@ -655,6 +661,7 @@ static void showPanel() {
     ShowWindow(G::hwnd, SW_SHOW);
     if (!G::inputFocus.acquire(G::hwnd, previous)) {
         G::visible = false; G::closing = false;
+        G::bridge.block(false);
         G::inputFocus.release(false);
         ShowWindow(G::hwnd, SW_HIDE);
         delete G::backdrop; G::backdrop = nullptr;
@@ -721,6 +728,8 @@ static void rebuildTabs() {
     Item hk; hk.title = L"呼出组合键"; hk.subtitle = L"当前：" + gp::Input::buttonNames((WORD)G::cfg.hotkeyMask);
     hk.target = L"__hotkey__"; hk.kind = lib::Command;
     tools.items.push_back(hk);
+    Item iso; iso.title = L"手柄输入隔离"; iso.subtitle = G::bridge.running() ? L"已启用 · 打开面板时游戏只收到归零输入" : L"设置隔离、安装驱动或恢复真实手柄";
+    iso.target = L"__isolation__"; iso.kind = lib::Command; tools.items.push_back(iso);
     Item add; add.title = L"批量添加游戏"; add.subtitle = L"支持 Ctrl / Shift 多选，也可一次拖入多个文件";
     add.target = L"__addgames__"; add.kind = lib::Command;
     tools.items.push_back(add);
@@ -787,6 +796,50 @@ static void importGames() {
     else if (FAILED(result) && result != HRESULT_FROM_WIN32(ERROR_CANCELLED)) toast(L"无法打开文件选择器，请重试或直接拖入文件");
 }
 
+static bool driverRegistered(const wchar_t* name) {
+    HKEY key=nullptr; std::wstring path=L"SYSTEM\\CurrentControlSet\\Services\\"+std::wstring(name);
+    bool exists=RegOpenKeyExW(HKEY_LOCAL_MACHINE,path.c_str(),0,KEY_READ,&key)==ERROR_SUCCESS;
+    if(key)RegCloseKey(key);
+    return exists;
+}
+static void installInputDriver(const wchar_t* file, const wchar_t* description) {
+    std::wstring path=lib::appDir()+L"\\drivers\\"+file;
+    if(!lib::fileExists(path)) {MessageBoxW(G::hwnd,L"驱动安装文件缺失，请使用完整安装包。",L"SideDeck",MB_OK|MB_ICONERROR);return;}
+    std::wstring message=std::wstring(L"将打开 ")+description+L" 官方安装程序，需要管理员确认。\n安装完成后请按提示手动重启，再回到工具 → 手柄输入隔离。\nSideDeck 不会自动重启电脑。";
+    if(MessageBoxW(G::hwnd,message.c_str(),L"安装手柄隔离依赖",MB_OKCANCEL|MB_ICONINFORMATION)!=IDOK)return;
+    auto result=ShellExecuteW(G::hwnd,L"runas",path.c_str(),L"/norestart",nullptr,SW_SHOWNORMAL);
+    if((INT_PTR)result<=32)MessageBoxW(G::hwnd,L"安装程序未启动或管理员授权被取消。",L"SideDeck",MB_OK|MB_ICONWARNING);
+}
+static void configureIsolation() {
+    if(G::dialogOpen)return;
+    G::dialogOpen=true;G::bridge.block(true);
+    auto finish=[] {G::dialogOpen=false;G::waitForRelease=true;G::bridge.block(G::visible);rebuildTabs();};
+    if(G::bridge.running() || lib::fileExists(isolation::recoveryPath())) {
+        if(MessageBoxW(G::hwnd,L"停止输入转发并恢复真实手柄？\n恢复后可能需要重新插拔手柄，或重新启动游戏。",L"恢复手柄",MB_OKCANCEL|MB_ICONQUESTION)==IDOK) {
+            G::bridge.stop();G::cfg.inputIsolation=false;saveCfg();
+            if(!isolation::restore())MessageBoxW(G::hwnd,L"恢复尚未完成。请关闭 HidHide 配置工具后重试；保留了恢复记录。",L"SideDeck",MB_OK|MB_ICONWARNING);
+            G::pad.ignoreIndex(-1);
+        }
+        finish();return;
+    }
+    if(!driverRegistered(L"HidHide")) {installInputDriver(L"HidHide_1.5.230_x64.exe",L"HidHide");finish();return;}
+    if(!driverRegistered(L"ViGEmBus")) {installInputDriver(L"ViGEmBus_1.22.0_x64_x86_arm64.exe",L"ViGEmBus");finish();return;}
+    auto candidates=isolation::devices();G::pad.ignoreIndex(-1);G::pad.poll();
+    if(candidates.size()!=1 || G::pad.count()!=1) {
+        MessageBoxW(G::hwnd,L"第一版一次接管一只 XInput 手柄。\n请只连接需要使用的那只手柄，关闭其他手柄映射工具，再重试。\n串流时只保留 Sunshine 生成的输入手柄。",L"选择输入手柄",MB_OK|MB_ICONINFORMATION);finish();return;
+    }
+    std::wstring message=L"接管："+candidates[0].name+L"\n\n首次设置请先退出游戏。真实手柄将仅对 SideDeck 可见，游戏使用虚拟 Xbox 手柄。\n\n完成后需要重新连接一次手柄，再启动游戏。";
+    if(MessageBoxW(G::hwnd,message.c_str(),L"启用手柄隔离",MB_OKCANCEL|MB_ICONINFORMATION)!=IDOK) {finish();return;}
+    std::wstring error;
+    if(G::bridge.start(candidates[0],(WORD)G::cfg.hotkeyMask,error)) {
+        MessageBoxW(G::hwnd,L"现在请关闭再打开手柄，或重新插拔 2.4G 接收器。\n如果是串流输入，请重建串流手柄连接。\n完成后点确定，SideDeck 将检查游戏侧是否仍能看到输入手柄。",L"重新连接手柄",MB_OK|MB_ICONINFORMATION);
+        if(G::bridge.verify(error)) {G::cfg.inputIsolation=true;saveCfg();toast(L"手柄隔离已通过独立验证");}
+        else G::bridge.stop();
+    }
+    if(!error.empty())MessageBoxW(G::hwnd,error.c_str(),L"未启用手柄隔离",MB_OK|MB_ICONWARNING);
+    finish();
+}
+
 // ==================== 动作 ====================
 static void openSelected() {
     if (G::themePicker) { applyTheme(G::themePick); return; }
@@ -850,6 +903,7 @@ static void openSelected() {
     }
     if (it.target == L"__rescan__") { rescan(); return; }
     if (it.target == L"__addgames__") { importGames(); return; }
+    if (it.target == L"__isolation__") { configureIsolation(); return; }
     if (it.target == L"__opendir__") { ShellExecuteW(nullptr, L"open", lib::appDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); return; }
     if (it.target == L"__openguides__") {
         std::wstring d = lib::guidesDir();
@@ -996,6 +1050,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 case 1003: rescan(); break;
                 case 1004: ShellExecuteW(nullptr, L"open", lib::appDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
                 case 1005: importGames(); break;
+                case 1008: configureIsolation(); break;
+                case 1009: {
+                    G::bridge.stop();G::cfg.inputIsolation=false;saveCfg();G::pad.ignoreIndex(-1);
+                    toast(isolation::restore()?L"已恢复真实手柄":L"恢复未完成，请关闭 HidHide 配置工具后重试");rebuildTabs();break;
+                }
                 case 1006: PostQuitMessage(0); break;
                 case 1007: {
                     ShellExecuteW(nullptr, L"open", lib::configPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -1043,6 +1102,24 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    int argumentCount=0;LPWSTR* arguments=CommandLineToArgvW(GetCommandLineW(),&argumentCount);
+    if(arguments && argumentCount==3 && wcscmp(arguments[1],L"--input-watchdog")==0) {
+        DWORD parent=(DWORD)wcstoul(arguments[2],nullptr,10);LocalFree(arguments);return isolation::watchdog(parent);
+    }
+    if(arguments && argumentCount==2 && wcscmp(arguments[1],L"--shutdown")==0) {
+        HWND window=FindWindowW(L"SideDeckOverlay",nullptr);DWORD pid=0;if(window)GetWindowThreadProcessId(window,&pid);
+        HANDLE process=pid?OpenProcess(SYNCHRONIZE,FALSE,pid):nullptr;
+        if(window)PostMessageW(window,WM_COMMAND,1006,0);
+        DWORD result=process?WaitForSingleObject(process,10000):WAIT_OBJECT_0;
+        if(process)CloseHandle(process);
+        LocalFree(arguments);return result==WAIT_OBJECT_0?0:1;
+    }
+    if(arguments && argumentCount==2 && wcscmp(arguments[1],L"--recover-input")==0) {
+        LocalFree(arguments);HWND window=FindWindowW(L"SideDeckOverlay",nullptr);
+        if(window) {DWORD_PTR result=0;return SendMessageTimeoutW(window,WM_COMMAND,1009,0,SMTO_ABORTIFHUNG,10000,&result)?0:2;}
+        return isolation::restore()?0:3;
+    }
+    if(arguments)LocalFree(arguments);
     G::hInst = hInstance;
     SetUnhandledExceptionFilter(CrashFilter);
     // DPI aware
@@ -1180,6 +1257,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         AppendMenuW(G::hTrayMenu, MF_STRING, 1002, L"收起面板");
         AppendMenuW(G::hTrayMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(G::hTrayMenu, MF_STRING, 1005, L"批量添加游戏…");
+        AppendMenuW(G::hTrayMenu, MF_STRING, 1008, L"手柄输入隔离 / 恢复…");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1003, L"重新扫描游戏库");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1004, L"打开程序目录");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1007, L"编辑配置");
@@ -1192,6 +1270,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     RegisterHotKey(G::hwnd, 1, MOD_CONTROL | MOD_NOREPEAT, VK_SPACE);   // Ctrl+空格 备用呼出
 
     if (!G::pad.available()) toast(L"未找到 XInput 运行时");
+    if(G::cfg.inputIsolation) {
+        auto candidates=isolation::devices();std::wstring error;
+        if(candidates.size()!=1 || !G::bridge.start(candidates[0],(WORD)G::cfg.hotkeyMask,error) || !G::bridge.verify(error)) {
+            G::bridge.stop();toast(L"手柄隔离未启用，请到工具页重新设置");
+        } else {G::bridge.block(false);rebuildTabs();}
+    }
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -1200,6 +1284,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     if (G::trayAdded) Shell_NotifyIconW(NIM_DELETE, &G::nid);
+    G::bridge.stop();
     G::inputFocus.release(true);
     KillTimer(G::hwnd, 1);
     UnregisterHotKey(G::hwnd, 1);
@@ -1233,6 +1318,7 @@ static void tickAnim(float elapsed = -1) {
                 return;
             }
             G::waitingForRelease = false;
+            G::bridge.block(false);
             G::inputFocus.release(restore);
             G::restoreOnClose = false;
             G::visible = false; G::closing = false;
@@ -1267,10 +1353,15 @@ static void tickAnim(float elapsed = -1) {
 
 static void tickGamepad() {
     using gp::Btn;
+    G::bridge.hotkey((WORD)G::cfg.hotkeyMask);
+    static int lastInputFault=-1;
+    int inputFault=G::bridge.fault();
+    if(inputFault!=lastInputFault) {G::dirty=true;lastInputFault=inputFault;}
     HWND foreground = GetForegroundWindow();
     DWORD foregroundProcess = 0;
     if (foreground) GetWindowThreadProcessId(foreground, &foregroundProcess);
     if (!G::visible && foreground && foregroundProcess != GetCurrentProcessId()) G::lastExternalForeground = foreground;
+    G::pad.ignoreIndex(G::bridge.virtualIndex());
     G::pad.poll();
     G::padCount = G::pad.count();
 

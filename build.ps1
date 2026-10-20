@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Release', 'Debug', 'Test', 'FocusTest')][string]$Configuration = 'Release',
+    [ValidateSet('Release', 'Debug', 'Test', 'FocusTest', 'InputTest')][string]$Configuration = 'Release',
     [string]$Compiler = $env:SIDEDECK_CXX
 )
 $ErrorActionPreference = 'Stop'
@@ -23,14 +23,14 @@ $previousPath = $env:PATH
 $env:PATH = "$binDir;$previousPath"
 try {
 $generated = Join-Path $projectRoot 'build/generated'
-$relativeOutput = if ($Configuration -in @('Test', 'FocusTest')) { 'build/tests' } else { "build/$($Configuration.ToLowerInvariant())" }
+$relativeOutput = if ($Configuration -in @('Test', 'FocusTest', 'InputTest')) { 'build/tests' } else { "build/$($Configuration.ToLowerInvariant())" }
 $outputDir = Join-Path $projectRoot $relativeOutput
 New-Item -ItemType Directory -Path $generated,$outputDir -Force | Out-Null
 $versionHeader = "#pragma once`n#define SIDEDECK_VERSION `"$version`"`n#define SIDEDECK_VERSION_W L`"$version`"`n#define SIDEDECK_VERSION_PARTS $versionParts`n"
 [IO.File]::WriteAllText((Join-Path $generated 'sidedeck_version.hpp'), $versionHeader, [Text.UTF8Encoding]::new($false))
 $arguments = @('-std=c++17', '-D_WIN32_WINNT=0x0A00', '-DUNICODE', '-D_UNICODE', '-static', '-static-libgcc', '-static-libstdc++', '-I', $generated)
-if ($Configuration -in @('Test', 'FocusTest')) {
-    $testName = if ($Configuration -eq 'FocusTest') { 'focus_integration' } else { 'regression' }
+if ($Configuration -in @('Test', 'FocusTest', 'InputTest')) {
+    $testName = if ($Configuration -eq 'FocusTest') { 'focus_integration' } elseif ($Configuration -eq 'InputTest') { 'input_driver_check' } else { 'regression' }
     $arguments += @('-O0', '-g', '-o', (Join-Path $outputDir "$testName.exe"), (Join-Path $projectRoot "tests/$testName.cpp"))
 } else {
     $resource = Join-Path $generated 'SideDeck.res.o'
@@ -41,8 +41,13 @@ if ($Configuration -in @('Test', 'FocusTest')) {
     $arguments += @('-o', (Join-Path $outputDir 'SideDeck.exe'), (Join-Path $projectRoot 'src/main.cpp'), $resource)
 }
 $arguments += @('-lgdiplus', '-lshell32', '-lshlwapi', '-luser32', '-lgdi32', '-lole32', '-loleaut32', '-luuid', '-ladvapi32', '-lcomctl32', '-lcomdlg32', '-lwinmm', '-ldbghelp')
+$arguments += @('-lsetupapi', '-lcfgmgr32')
 & $Compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw "$Configuration compilation failed." }
+if ($Configuration -in @('Release', 'Debug')) {
+    & $Compiler '-std=c++17' '-O2' '-static' '-static-libgcc' '-static-libstdc++' '-o' (Join-Path $outputDir 'SideDeck.InputProbe.exe') (Join-Path $projectRoot 'src/input_probe.cpp') '-luser32'
+    if ($LASTEXITCODE -ne 0) { throw 'Input probe compilation failed.' }
+}
 if ($Configuration -eq 'Release') {
     & (Join-Path $binDir 'strip.exe') '-s' (Join-Path $outputDir 'SideDeck.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Executable strip failed.' }

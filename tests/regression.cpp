@@ -68,6 +68,20 @@ int main() {
         assert(gp::verticalDirection(1) == -1 && gp::verticalDirection(-1) == 1);
         assert(gp::Input::norm(32767) == 1 && gp::Input::norm(-32768) == -1);
         gp::Pad neutral{}; assert(gp::isNeutral(neutral));
+        isolation::Gate gate;gp::Pad held{};held.wButtons=gp::A;
+        assert(gate.output(held,false,true).wButtons==0); // startup waits for release
+        assert(gate.output({},false,true).wButtons==0);
+        assert(gate.output(held,false,true).wButtons==gp::A);
+        assert(gate.output(held,true,true).wButtons==0); // panel consumes input
+        assert(gate.output(held,false,true).wButtons==0); // close cannot leak held A
+        gate.output({},false,true);assert(gate.output(held,false,true).wButtons==gp::A);
+        assert(gate.output(held,false,false).wButtons==0); // disconnect resets gate
+        assert(gate.output(held,false,true).wButtons==0);
+        held={};held.sThumbLX=24000;held.bRightTrigger=200;
+        assert(gate.output(held,false,true).sThumbLX==0);
+        gate.output({},false,true);auto forwarded=gate.output(held,false,true);
+        assert(forwarded.sThumbLX==24000 && forwarded.bRightTrigger==200);
+        assert(isolation::contains({L"USB\\Demo"},L"usb\\demo"));
         neutral.wButtons = gp::B; assert(!gp::isNeutral(neutral));
         neutral = {}; neutral.sThumbRY = 10000; assert(!gp::isNeutral(neutral));
         neutral = {}; neutral.sThumbLY = -10000; assert(!gp::isNeutral(neutral));

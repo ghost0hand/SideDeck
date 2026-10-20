@@ -5,6 +5,9 @@ $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEn
 $source = Join-Path $projectRoot 'build/release/SideDeck.exe'
 $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
 if (!(Test-Path -LiteralPath $source)) { throw 'Run build.ps1 first.' }
+foreach ($dependency in @('build/release/SideDeck.InputProbe.exe','build/deps/ViGEmClient.dll','build/deps/HidHide_1.5.230_x64.exe','build/deps/ViGEmBus_1.22.0_x64_x86_arm64.exe')) {
+    if (!(Test-Path -LiteralPath (Join-Path $projectRoot $dependency))) { throw 'Run tools/package.ps1 to prepare the complete package first.' }
+}
 if ((Get-Item -LiteralPath $source).VersionInfo.ProductVersion -ne $version) { throw 'Build version differs from VERSION.' }
 # Only ask this workspace's own overlay windows to quit normally. No forced process termination.
 $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
@@ -56,4 +59,13 @@ if ($ArchiveLegacy) {
     }
 }
 Copy-Item -LiteralPath $source -Destination (Join-Path $projectRoot 'SideDeck.exe') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'build/release/SideDeck.InputProbe.exe') -Destination (Join-Path $projectRoot 'SideDeck.InputProbe.exe') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'build/deps/ViGEmClient.dll') -Destination (Join-Path $projectRoot 'ViGEmClient.dll') -Force
+New-Item -ItemType Directory -Path (Join-Path $projectRoot 'drivers'),(Join-Path $projectRoot 'licenses') -Force | Out-Null
+foreach($file in @('HidHide_1.5.230_x64.exe','ViGEmBus_1.22.0_x64_x86_arm64.exe')) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "build/deps/$file") -Destination (Join-Path $projectRoot "drivers/$file") -Force
+}
+foreach($file in @('ViGEmClient-LICENSE.txt','HidHide-LICENSE.txt')) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "third_party/$file") -Destination (Join-Path $projectRoot "licenses/$file") -Force
+}
 Write-Host "Installed v$version as SideDeck.exe; personal config and guides retained."

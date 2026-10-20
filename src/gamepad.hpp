@@ -53,6 +53,11 @@ public:
     ~Input() { if (dll_) FreeLibrary(dll_); }
 
     bool available() const { return getState_ != nullptr; }
+    void ignoreIndex(int index) { ignoredIndex_ = index; }
+    void vibration(int index, WORD large, WORD small) {
+        struct Vibration { WORD large, small; } value{large,small};
+        if(setState_)setState_(index,&value);
+    }
 
     // 返回已连接手柄数量；state[i] 填充（未连接则 buttons=0）
     int poll() {
@@ -60,7 +65,7 @@ public:
         connected_ = 0;
         for (int i = 0; i < MAX_PADS; i++) {
             State s{};
-            DWORD r = getState_(i, &s);
+            DWORD r = i == ignoredIndex_ ? ERROR_DEVICE_NOT_CONNECTED : getState_(i, &s);
             if (r == 0 /*ERROR_SUCCESS*/) {
                 st_[i] = s;
                 if (!wasConnected_[i]) { wasConnected_[i] = true; }
@@ -136,24 +141,28 @@ public:
 private:
     typedef DWORD (WINAPI* GetStateT)(DWORD, State*);
     typedef DWORD (WINAPI* GetBatteryT)(DWORD, BYTE, Battery*);
+    typedef DWORD (WINAPI* SetStateT)(DWORD, void*);
 
     HMODULE dll_ = nullptr;
     GetStateT getState_ = nullptr;
     GetBatteryT getBattery_ = nullptr;
+    SetStateT setState_ = nullptr;
     State st_[MAX_PADS]{};
     bool wasConnected_[MAX_PADS]{};
     int connected_ = 0;
+    int ignoredIndex_ = -1;
 
     void load() {
         const wchar_t* names[] = { L"xinput1_4.dll", L"xinput1_3.dll", L"xinput1_2.dll", L"xinput9_1_0.dll" };
         for (auto n : names) {
-            HMODULE h = LoadLibraryW(n);
+            HMODULE h = LoadLibraryExW(n, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
             if (!h) continue;
             FARPROC f = GetProcAddress(h, "XInputGetState");
             if (!f) { FreeLibrary(h); continue; }
             dll_ = h;
             getState_ = (GetStateT)f;
             getBattery_ = (GetBatteryT)GetProcAddress(h, "XInputGetBatteryInformation");
+            setState_ = (SetStateT)GetProcAddress(h, "XInputSetState");
             break;
         }
     }

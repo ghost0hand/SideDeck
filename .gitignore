@@ -1,6 +1,13 @@
 # Personal data / local guide assets are not part of the source repository.
 /config.json
 /config.json.tmp
+/input-recovery.json
+/input-recovery.json.tmp
+/input-diagnostics.json
+/drivers/
+/licenses/
+/unins*.dat
+/unins*.msg
 /guides/
 /map_imgs/
 /suit_imgs/
