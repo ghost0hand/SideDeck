@@ -22,6 +22,11 @@ namespace detail {
 #include <memory>
 #include <cmath>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <atomic>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "gdiplus")
@@ -143,6 +148,17 @@ inline void roundRectPath(GraphicsPath& p, REAL x, REAL y, REAL w, REAL h, REAL 
 inline void drawImage(Graphics& g, Image* img, float x, float y, float w, float h) {
     g.DrawImage(img, (REAL)x, (REAL)y, (REAL)w, (REAL)h);
 }
+// Cached UI is already rasterized at the destination resolution. Re-sampling
+// it with bicubic interpolation costs more than drawing the original text.
+inline void drawCachedBitmap(Graphics& g,Bitmap* bitmap,float x,float y,bool copy=false) {
+    auto saved=g.Save();
+    g.SetInterpolationMode(InterpolationModeNearestNeighbor);g.SetPixelOffsetMode(PixelOffsetModeNone);
+    g.SetCompositingQuality(CompositingQualityHighSpeed);
+    if(copy)g.SetCompositingMode(CompositingModeSourceCopy);
+    int width=(int)bitmap->GetWidth(),height=(int)bitmap->GetHeight();
+    g.DrawImage(bitmap,Rect((int)roundf(x),(int)roundf(y),width,height),0,0,width,height,UnitPixel);
+    g.Restore(saved);
+}
 inline void drawImageOpacity(Graphics& g, Image* img, float x, float y, float w, float h, float opacity) {
     ColorMatrix matrix = {1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,opacity,0, 0,0,0,0,1};
     ImageAttributes attrs;
@@ -190,12 +206,17 @@ struct TextStyle {
 
 // 手持/串流场景整体放大字号
 inline float g_textScale = 1.0f;
+inline std::map<std::pair<float,int>,std::unique_ptr<Font>> fontCache;
+inline Font* cachedFont(float size,bool bold) {
+    auto key=std::make_pair(size*g_textScale,bold?FontStyleBold:FontStyleRegular);
+    auto found=fontCache.find(key);if(found!=fontCache.end())return found->second.get();
+    FontFamily family(L"Microsoft YaHei UI");auto font=std::make_unique<Font>(&family,key.first,key.second,UnitPixel);
+    auto result=font.get();fontCache.emplace(key,std::move(font));return result;
+}
 
 inline void drawText(Graphics& g, const std::wstring& text, float x, float y, float w, float h, const TextStyle& st) {
     if (text.empty()) return;
-    FontFamily fam(L"Microsoft YaHei UI");
-    int style = st.bold ? FontStyleBold : FontStyleRegular;
-    Font font(&fam, st.size * g_textScale, style, UnitPixel);
+    Font* font=cachedFont(st.size,st.bold);
     StringFormat sf(st.wrap ? 0 : StringFormatFlagsNoWrap);
     sf.SetAlignment(st.halign);
     sf.SetLineAlignment(st.valign);
@@ -203,14 +224,12 @@ inline void drawText(Graphics& g, const std::wstring& text, float x, float y, fl
     RectF rc(x, y, w, h);
     SolidBrush br(st.color.gd());
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-    g.DrawString(text.c_str(), (int)text.size(), &font, rc, &sf, &br);
+    g.DrawString(text.c_str(), (int)text.size(), font, rc, &sf, &br);
 }
 
 inline float measureText(Graphics& g, const std::wstring& text, float size, bool bold = false) {
-    FontFamily fam(L"Microsoft YaHei UI");
-    Font font(&fam, size * g_textScale, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
     RectF rc;
-    g.MeasureString(text.c_str(), (int)text.size(), &font, PointF(0, 0), &rc);
+    g.MeasureString(text.c_str(), (int)text.size(), cachedFont(size,bold), PointF(0, 0), &rc);
     return rc.Width;
 }
 
@@ -328,15 +347,38 @@ class IconCache {
 public:
     ~IconCache() { clear(); }
     void clear() {
+        {std::lock_guard<std::mutex> lock(mutex_);stopping_=true;pending_.clear();}
+        wake_.notify_all();if(worker_.joinable())worker_.join();
+        std::lock_guard<std::mutex> lock(mutex_);
         for (auto& kv : map_) delete kv.second;
         map_.clear();
+        async_=false;
+    }
+    unsigned revision() const {return revision_;}
+    void enableAsync() {
+        if(async_)return;
+        async_=true;stopping_=false;
+        worker_=std::thread([this] {
+            HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+            for(;;) {
+                Job job;
+                {std::unique_lock<std::mutex> lock(mutex_);wake_.wait(lock,[&]{return stopping_||!pending_.empty();});
+                 if(stopping_)break;
+                 job=std::move(pending_.front());pending_.pop_front();}
+                Bitmap* bitmap=load(job.path,job.size);
+                {std::lock_guard<std::mutex> lock(mutex_);if(stopping_){delete bitmap;break;}map_[job.key]=bitmap;++revision_;}
+            }
+            if(SUCCEEDED(com))CoUninitialize();
+        });
     }
     // 返回缓存中的位图（64x64 或原始尺寸缩放到 size），失败返回 nullptr
     // 失败返回 nullptr（调用方可回退到别的路径）；nullptr 也缓存避免反复读盘
     Bitmap* get(const std::wstring& path, int size = 48) {
+        std::lock_guard<std::mutex> lock(mutex_);
         std::wstring key = path + L"|" + std::to_wstring(size);
         auto it = map_.find(key);
         if (it != map_.end()) return it->second;
+        if(async_) {map_[key]=nullptr;pending_.push_back({key,path,size});wake_.notify_one();return nullptr;}
         Bitmap* bmp = load(path, size);
         map_[key] = bmp;
         return bmp;
@@ -350,6 +392,13 @@ public:
     }
 
 private:
+    struct Job {std::wstring key,path;int size=48;};
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::deque<Job> pending_;
+    std::thread worker_;
+    bool async_=false,stopping_=false;
+    std::atomic<unsigned> revision_{0};
     std::map<std::wstring, Bitmap*> map_;
 
     // 48px 图标列表。JUMBO 常把小图标放在 256px 透明画布的一角，缩小后近乎消失。

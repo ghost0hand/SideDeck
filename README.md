@@ -8,6 +8,10 @@
 
 - 手柄默认 LB + RB 呼出；也支持长按 Back 和 Ctrl + 空格。
 - 上下 / 左摇杆选择，A 打开，B 返回，LB / RB 切换标签。
+- 游戏库：Y 收藏 / 取消收藏，按下左摇杆切换全部 / 仅收藏，LT / RT 翻整页。
+- X 打开字母速跳：十字键 / 左摇杆选字母，A 跳转，B 关闭；也可直接点击字母。
+- 中文游戏按拼音首字母分组，英文按 A–Z，数字与其他字符归入 #；多音字采用默认字音，生僻字用系统拼音排序推断。
+- 键盘 F2 收藏、F3 字母面板、F4 仅收藏，A–Z 直接跳转，PageUp / PageDown 翻整页。
 - 阅读时用右摇杆滚动，X 回到顶部。
 - 「工具 → 外观主题」提供冰川玻璃、暮紫玻璃、烟灰玻璃、浅色磨砂。
 - 支持 Steam / Epic 扫描；「工具 → 批量添加游戏」或托盘同名菜单支持 Ctrl / Shift 多选 exe、lnk、url，也可一次拖入多个文件，重复路径会自动跳过。
@@ -48,6 +52,8 @@
 ./build/tests/focus_integration.exe # 可选：用临时测试窗口验证跨进程焦点交接
 ./tools/package.ps1                # 校验/准备依赖，构建带驱动安装文件的安装包
 ./build.ps1 -Configuration InputTest
+./build.ps1 -Configuration PerfTest
+./build/tests/render_benchmark.exe # 合成离屏滚动，无缓存 / 缓存两种路径对比
 # 手动将 build/deps/ViGEmClient.dll 放入 build/tests 后运行 input_driver_check.exe
 # 此检查只创建归零的虚拟手柄，不模拟操作；需要本机已有 ViGEmBus。
 ```
@@ -55,6 +61,8 @@
 若没有本地工具链，将 g++.exe 加入 PATH，或设置环境变量 SIDEDECK_CXX 指向完整路径。版本从 VERSION 读取，自动写入程序与 Windows 版本资源。
 
 安装包还需要 Inno Setup（本次本地使用 7.1.0）。工具许可按其发行条款适用。依赖下载固定版本和 SHA-256，两个原始驱动安装器还校验 Authenticode 发布者；第三方许可见 THIRD_PARTY_NOTICES.md。驱动不会在构建或安装 SideDeck 本体时自动安装。
+
+0.3.1 的性能改进保留现有透明窗口：后台加载图标，缓存字体、背景及卡片。仍由 GDI+ 绘制，未切换 GPU 渲染后端。性能脚本只测合成内容的离屏绘制，不包含窗口提交、手柄硬件、游戏帧率或网络延迟。
 
 现有 Git Bash 入口 build.sh、build_debug.sh、test.sh 仍可使用，内部调用同一套 PowerShell 构建。
 

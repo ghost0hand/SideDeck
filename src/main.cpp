@@ -31,6 +31,7 @@
 #include "library.hpp"
 #include "focus_guard.hpp"
 #include "input_bridge.hpp"
+#include "library_index.hpp"
 
 using namespace Gdiplus;
 using lib::Item;
@@ -45,6 +46,17 @@ using lib::Config;
 namespace G {
 Config cfg;
 std::vector<Tab> tabs;
+std::vector<Item> allGames;
+bool favoritesOnly=false,jumpPicker=false;
+int jumpIndex=0;
+std::vector<RectF> libraryActions,jumpCells;
+std::wstring jumpLetters=L"ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
+bool jumpAvailable[27]{};
+std::map<std::wstring,std::unique_ptr<Bitmap>> rowCache;
+std::unique_ptr<Bitmap> glassCache;
+int glassWidth=0,glassHeight=0,glassTheme=-1;
+unsigned rowRevision=0;
+bool renderCaching=true;
 int tabIndex = 0;
 std::vector<int> sel;
 std::vector<float> scroll, scrollTarget;
@@ -107,6 +119,8 @@ DWORD lastRepeat = 0;
 bool stickConsumed = false;
 DWORD lastPoll = 0;
 int padCount = 0;
+int triggerDirection=0;
+DWORD triggerRepeat=0;
 bool rescanRequested = false;
 bool dirty = false;
 }
@@ -207,6 +221,11 @@ static void saveCfg();
 static void applyTheme(int id);
 static void importGames();
 static void configureIsolation();
+static void toggleFavorite();
+static void toggleFavoritesOnly();
+static void openJumpPicker();
+static void jumpTo(wchar_t letter);
+static void refreshGameView();
 
 // ==================== 绘制 ====================
 // UI 缩放：手持设备/电视串流场景整体放大
@@ -218,10 +237,10 @@ static float S() { return G::cfg.scale; }
 #define ITEM_H   (72.0f * S())
 #define ITEM_GAP (10.0f * S())
 
-static float listTop() { return HEADER_H + TAB_H + 12 * S(); }
+static float listTop() { return HEADER_H + TAB_H + 12 * S() + (G::view==0 && G::tabIndex==0 ? 36*S() : 0); }
 static float listBottom() { return G::H - FOOTER_H - 10 * S(); }
 
-static void drawItemCard(Graphics& g, const Item& it, float x, float y, float w, float h, bool selected, float appear) {
+static void paintItemCard(Graphics& g, const Item& it, float x, float y, float w, float h, bool selected, float appear) {
     auto& T = ui::theme();
     float pad = 12.0f * S();
     float iconS = h - pad * 2;
@@ -262,6 +281,10 @@ static void drawItemCard(Graphics& g, const Item& it, float x, float y, float w,
     }
     float tx = ix + iconS + 12 * S();
     float tw = (x + w) - tx - pad;
+    if(it.pinned) {
+        ui::TextStyle star;star.size=16;star.color=T.accentB;star.halign=StringAlignmentCenter;
+        ui::drawText(g,L"★",x+w-pad-22*S(),y+pad,24*S(),28*S(),star);tw-=26*S();
+    }
     float titleH = 24 * S(), subH = 18 * S(), gap = 4 * S();
     float textY = y + (h - titleH - gap - subH) / 2;
     ui::TextStyle t1; t1.size = 14.5f; t1.bold = selected;
@@ -270,6 +293,22 @@ static void drawItemCard(Graphics& g, const Item& it, float x, float y, float w,
     ui::TextStyle t2; t2.size = 11.5f; t2.color = T.textFaint;
     std::wstring sub = it.subtitle.empty() ? it.target : it.subtitle;
     ui::drawText(g, sub, tx, textY + titleH + gap, tw, subH, t2);
+}
+static void drawItemCard(Graphics& g,const Item& item,float x,float y,float w,float h,bool selected,float appear) {
+    if(!G::renderCaching || G::themeProgress<1) {paintItemCard(g,item,x,y,w,h,selected,appear);return;}
+    unsigned revision=G::iconCache.revision();
+    if(revision!=G::rowRevision){G::rowCache.clear();G::rowRevision=revision;}
+    std::wstring key=item.title+L"\n"+item.subtitle+L"\n"+item.target+L"\n"+item.iconPath+L"|"+
+        std::to_wstring(item.kind)+L"|"+std::to_wstring(item.pinned)+L"|"+std::to_wstring(selected)+L"|"+
+        std::to_wstring(G::cfg.theme)+L"|"+std::to_wstring(S())+L"|"+std::to_wstring(w)+L"|"+std::to_wstring(h);
+    auto found=G::rowCache.find(key);
+    if(found==G::rowCache.end()) {
+        if(G::rowCache.size()>=128)G::rowCache.clear();
+        auto bitmap=std::make_unique<Bitmap>((int)ceilf(w),(int)ceilf(h),PixelFormat32bppPARGB);
+        {Graphics buffer(bitmap.get());buffer.Clear(Gdiplus::Color(0,0,0,0));buffer.SetSmoothingMode(SmoothingModeHighQuality);paintItemCard(buffer,item,0,0,w,h,selected,appear);}
+        found=G::rowCache.emplace(key,std::move(bitmap)).first;
+    }
+    ui::drawCachedBitmap(g,found->second.get(),x,y);
 }
 
 static void drawReader(Graphics& g, float w, float h) {
@@ -386,6 +425,29 @@ static void drawThemePicker(Graphics& g) {
     ui::drawText(g, L"↑↓ 选择    A 应用    B 返回", sheet.X, sheet.GetBottom() - 34 * S(), sheet.Width, 23 * S(), hint);
 }
 
+static void drawJumpPicker(Graphics& g) {
+    auto& theme=ui::theme();float width=G::W-PADX*2,height=std::min(380*S(),G::H-48*S());
+    float x=PADX,y=(G::H-height)/2;
+    ui::fillRoundRect(g,ui::Color(0,0,0,155),0,0,(float)G::W,(float)G::H,22*S());
+    ui::fillRoundRect(g,theme.panelTop.withA(250),x,y,width,height,20*S());
+    ui::TextStyle title;title.size=18;title.bold=true;title.color=theme.text;
+    ui::drawText(g,L"字母速跳",x+18*S(),y+16*S(),width-36*S(),32*S(),title);
+    ui::TextStyle note;note.size=10.5f;note.color=theme.textDim;
+    ui::drawText(g,L"中文按拼音首字母 · 数字 / 其他归入 #",x+18*S(),y+54*S(),width-36*S(),24*S(),note);
+    float cellWidth=(width-28*S())/6,cellHeight=(height-128*S())/5;
+    G::jumpCells.clear();auto& items=G::tabs[0].items;
+    for(int i=0;i<(int)G::jumpLetters.size();++i) {
+        RectF cell(x+14*S()+i%6*cellWidth,y+88*S()+i/6*cellHeight,cellWidth-6*S(),cellHeight-6*S());
+        G::jumpCells.push_back(cell);bool enabled=G::jumpAvailable[i];
+        bool selected=i==G::jumpIndex;
+        ui::fillRoundRect(g,selected?theme.selBg:theme.chip,cell.X,cell.Y,cell.Width,cell.Height,9*S());
+        if(selected)ui::drawRoundRect(g,theme.accentB,cell.X,cell.Y,cell.Width,cell.Height,9*S());
+        ui::TextStyle text;text.size=15;text.bold=selected;text.halign=StringAlignmentCenter;text.color=enabled?theme.text:theme.textFaint.withA(80);
+        ui::drawText(g,std::wstring(1,G::jumpLetters[i]),cell.X,cell.Y,cell.Width,cell.Height,text);
+    }
+    note.halign=StringAlignmentCenter;
+    ui::drawText(g,L"十字键 / 左摇杆选择 · A 跳转 · B 返回",x,y+height-34*S(),width,24*S(),note);
+}
 static void drawPanel(Graphics& g) {
     auto& T = ui::theme();
     float w = (float)G::W, h = (float)G::H;
@@ -396,7 +458,7 @@ static void drawPanel(Graphics& g) {
         return;
     }
 
-    // 半透明模糊采样 + 分层玻璃色；保留真实的窗口透明度。
+    auto paintGlass=[&](Graphics& g) {
     auto glassState = g.Save();
     GraphicsPath silhouette; ui::roundRectPath(silhouette, 0, 0, w, h, 22 * S());
     g.SetClip(&silhouette, CombineModeIntersect);
@@ -414,6 +476,16 @@ static void drawPanel(Graphics& g) {
     }
     g.Restore(glassState);
     ui::drawRoundRect(g, T.rim, 0.75f, 0.75f, w - 1.5f, h - 1.5f, 22 * S(), 1.1f);
+    };
+    if(!G::renderCaching || G::themeProgress<1) {G::glassCache.reset();paintGlass(g);}
+    else {
+        if(!G::glassCache || G::glassWidth!=G::W || G::glassHeight!=G::H || G::glassTheme!=G::cfg.theme) {
+            G::glassCache=std::make_unique<Bitmap>(G::W,G::H,PixelFormat32bppPARGB);
+            Graphics background(G::glassCache.get());background.Clear(Gdiplus::Color(0,0,0,0));background.SetSmoothingMode(SmoothingModeHighQuality);paintGlass(background);
+            G::glassWidth=G::W;G::glassHeight=G::H;G::glassTheme=G::cfg.theme;
+        }
+        ui::drawCachedBitmap(g,G::glassCache.get(),0,0,true);
+    }
 
     // ---- 顶部 ----
     if (G::view == 0) {
@@ -473,6 +545,19 @@ static void drawPanel(Graphics& g) {
         }
         g.Restore(tabClip);
 
+        G::libraryActions.clear();
+        if(G::tabIndex==0) {
+            bool chosenFavorite=!G::tabs[0].items.empty() && G::tabs[0].items[G::sel[0]].pinned;
+            const std::wstring labels[]={chosenFavorite?L"Y  取消收藏":L"Y  收藏",L"X  字母速跳",G::favoritesOnly?L"LS  全部游戏":L"LS  仅收藏"};
+            float actionWidth=(w-PADX*2-12*S())/3;
+            for(int i=0;i<3;++i) {
+                RectF action(PADX+i*(actionWidth+6*S()),HEADER_H+TAB_H,actionWidth,28*S());G::libraryActions.push_back(action);
+                ui::fillRoundRect(g,i==2&&G::favoritesOnly?T.selBg:T.chip,action.X,action.Y,action.Width,action.Height,11*S());
+                ui::TextStyle text;text.size=10.5f;text.halign=StringAlignmentCenter;text.color=T.textDim;
+                ui::drawText(g,labels[i],action.X,action.Y,action.Width,action.Height,text);
+            }
+        }
+
         // ---- 列表 ----
         auto& items = G::tabs[G::tabIndex].items;
         float listTop = ::listTop();
@@ -509,7 +594,7 @@ static void drawPanel(Graphics& g) {
 
         if (items.empty()) {
             ui::TextStyle et; et.size = 13; et.color = T.textFaint; et.halign = StringAlignmentCenter;
-            ui::drawText(g, L"空空如也 —— 拖个游戏进来，或托盘菜单添加", 0, listTop + 40.0f * S(), w, 30.0f * S(), et);
+            ui::drawText(g, G::tabIndex==0&&G::favoritesOnly?L"暂无收藏 · 按 LS 返回全部游戏":L"空空如也 —— 拖个游戏进来，或托盘菜单添加", 0, listTop + 40.0f * S(), w, 30.0f * S(), et);
         }
 
         // 滚动条
@@ -527,6 +612,7 @@ static void drawPanel(Graphics& g) {
     struct Hint { const wchar_t* k; const wchar_t* v; };
     Hint listHints[] = { { L"↑↓", L"选择" }, { L"A", L"打开" }, { L"LB·RB", L"换页" }, { L"B", L"收起" } };
     if (G::tabIndex == G::htmlTabIndex) listHints[3].v = L"返回";
+    if(G::tabIndex==0) {listHints[2].k=L"LT·RT";listHints[2].v=L"翻整页";}
     Hint readerHints[] = { { L"↑↓", L"滚动" }, { L"RS", L"滚动" }, { L"X", L"顶部" }, { L"B", L"返回" } };
     auto& hints = G::view == 1 ? readerHints : listHints;
     float hx = PADX + 12.0f * S();
@@ -564,6 +650,7 @@ static void drawPanel(Graphics& g) {
         ui::drawText(g, G::toastMsg, PADX, ty3, w - PADX * 2, 36, ts);
     }
     if (G::themePicker) drawThemePicker(g);
+    if (G::jumpPicker) drawJumpPicker(g);
 }
 
 static void renderFrame() {
@@ -606,6 +693,7 @@ static void renderFrame() {
 
 // ==================== 显示 / 隐藏 ====================
 static void refreshBackdrop() {
+    G::glassCache.reset();
     delete G::backdrop; G::backdrop = nullptr;
     G::backdrop = ui::grabBackdrop(G::PX, G::PY, G::W, G::H, 24, 4);
 }
@@ -642,6 +730,7 @@ static void showPanel() {
     G::anim = 0.0f;
     G::animTick = GetTickCount64();
     G::focusReady = false; G::pillReady = false;
+    G::triggerDirection=0;G::triggerRepeat=0;
     // 可选：给游戏发暂停键
     if (!G::cfg.pauseKey.empty()) {
         std::wstring k = G::cfg.pauseKey;
@@ -683,12 +772,27 @@ static void hidePanel(bool restoreFocus) {
     G::closing = true;
     G::restoreOnClose = restoreFocus && G::inputFocus.ownsForeground();
     G::themePicker = false;
+    G::jumpPicker = false;
     G::captureHotkey = false;
     G::recordedMask = 0; G::recordArmed = false;
     ReleaseCapture();
 }
 
 // ==================== 数据 ====================
+static void refreshGameView() {
+    if(G::tabs.empty())return;
+    std::wstring selected;
+    if(!G::sel.empty() && G::sel[0]>=0 && G::sel[0]<(int)G::tabs[0].items.size())selected=libraryindex::identity(G::tabs[0].items[G::sel[0]]);
+    auto& items=G::tabs[0].items;items.clear();
+    for(auto item:G::allGames) {
+        item.pinned=libraryindex::favorite(G::cfg,item);
+        if(!G::favoritesOnly || item.pinned)items.push_back(std::move(item));
+    }
+    if(G::sel.empty())G::sel.resize(G::tabs.size());
+    G::sel[0]=0;
+    for(size_t i=0;i<items.size();++i)if(libraryindex::identity(items[i])==selected)G::sel[0]=(int)i;
+    G::focusReady=false;G::dirty=true;
+}
 static void rebuildTabs() {
     G::tabs.clear();
     G::htmlTabIndex = -1;
@@ -697,7 +801,9 @@ static void rebuildTabs() {
     for (auto& it : G::cfg.manual) games.items.push_back(it);
     // 扫描（来自缓存或即时扫描）
     static std::vector<Item> scanned;
-    if (scanned.empty() || G::rescanRequested) {
+    static bool scannedReady=false;
+    if (!scannedReady || G::rescanRequested) {
+        scannedReady=true;
         scanned.clear();
         G::rescanRequested = false;
         if (G::cfg.scanSteam) { auto v = lib::scanSteam(); scanned.insert(scanned.end(), v.begin(), v.end()); }
@@ -714,6 +820,14 @@ static void rebuildTabs() {
         for (auto& m : games.items) if (m.target == it.target) { dup = true; break; }
         if (!dup) games.items.push_back(it);
     }
+    G::allGames=std::move(games.items);
+    std::map<std::wstring,wchar_t> initials;
+    for(auto& item:G::allGames)initials[item.title]=libraryindex::initial(item.title);
+    std::stable_sort(G::allGames.begin(),G::allGames.end(),[&](const Item& a,const Item& b) {
+        wchar_t left=initials[a.title],right=initials[b.title];
+        if(left!=right)return left==L'#'?false:right==L'#'?true:left<right;
+        return CompareStringEx(L"zh-CN",NORM_IGNORECASE,a.title.c_str(),-1,b.title.c_str(),-1,nullptr,nullptr,0)==CSTR_LESS_THAN;
+    });
     G::tabs.push_back(games);
 
     Tab guides; guides.name = L"攻略";
@@ -749,6 +863,7 @@ static void rebuildTabs() {
     G::sel.resize(G::tabs.size());
     G::scroll.resize(G::tabs.size());
     G::scrollTarget.resize(G::tabs.size());
+    refreshGameView();
     for (size_t i = 0; i < G::tabs.size(); i++) {
         G::sel[i] = std::clamp(G::sel[i], 0, std::max(0, (int)G::tabs[i].items.size() - 1));
     }
@@ -763,6 +878,40 @@ static void rescan() {
 }
 
 static void saveCfg() { lib::saveConfig(G::cfg); }
+static void toggleFavorite() {
+    if(G::view!=0 || G::tabIndex!=0 || G::jumpPicker || G::tabs[0].items.empty())return;
+    Item item=G::tabs[0].items[G::sel[0]];
+    bool added=libraryindex::toggle(G::cfg,item);saveCfg();refreshGameView();
+    toast(added?L"已收藏":L"已取消收藏");
+}
+static void toggleFavoritesOnly() {
+    if(G::view!=0 || G::tabIndex!=0 || G::jumpPicker)return;
+    G::favoritesOnly=!G::favoritesOnly;refreshGameView();G::sel[0]=0;G::scroll[0]=G::scrollTarget[0]=0;
+}
+static void snapSelection(int index) {
+    auto& items=G::tabs[G::tabIndex].items;if(items.empty())return;
+    G::sel[G::tabIndex]=std::clamp(index,0,(int)items.size()-1);
+    float height=listBottom()-listTop(),step=ITEM_H+ITEM_GAP;
+    float target=std::clamp(G::sel[G::tabIndex]*step-height/2+ITEM_H/2,0.0f,std::max(0.0f,(float)items.size()*step-height));
+    G::scroll[G::tabIndex]=G::scrollTarget[G::tabIndex]=target;G::focusReady=false;G::dirty=true;
+}
+static void openJumpPicker() {
+    if(G::view!=0 || G::tabIndex!=0 || G::themePicker)return;
+    std::fill(std::begin(G::jumpAvailable),std::end(G::jumpAvailable),false);
+    for(auto& item:G::tabs[0].items) {
+        auto position=G::jumpLetters.find(libraryindex::initial(item.title));
+        if(position!=std::wstring::npos)G::jumpAvailable[position]=true;
+    }
+    G::jumpIndex=0;
+    if(!G::tabs[0].items.empty())G::jumpIndex=(int)G::jumpLetters.find(libraryindex::initial(G::tabs[0].items[G::sel[0]].title));
+    G::jumpPicker=true;G::dirty=true;
+}
+static void jumpTo(wchar_t letter) {
+    if(G::tabIndex!=0 || G::view!=0)return;
+    int index=libraryindex::find(G::tabs[0].items,letter);
+    if(index<0){toast(L"这个字母下暂无游戏");return;}
+    G::jumpPicker=false;snapSelection(index);toast(std::wstring(L"已跳到 ")+letter);
+}
 
 static void applyTheme(int id) {
     id = std::clamp(id, 0, ui::THEME_COUNT - 1);
@@ -842,6 +991,7 @@ static void configureIsolation() {
 
 // ==================== 动作 ====================
 static void openSelected() {
+    if(G::jumpPicker){jumpTo(G::jumpLetters[G::jumpIndex]);return;}
     if (G::themePicker) { applyTheme(G::themePick); return; }
     if (G::view == 1) return;
     auto& items = G::tabs[G::tabIndex].items;
@@ -920,6 +1070,7 @@ static void openSelected() {
 }
 
 static void navigate(int delta) {
+    if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta*6,0,26);G::dirty=true;return;}
     if (G::themePicker) {
         G::themePick = std::clamp(G::themePick + delta, 0, ui::THEME_COUNT - 1);
         G::dirty = true; return;
@@ -934,10 +1085,17 @@ static void navigate(int delta) {
     int n = (int)items.size();
     int before = G::sel[G::tabIndex];
     G::sel[G::tabIndex] = std::clamp(G::sel[G::tabIndex] + delta, 0, n - 1);
+    if(abs(delta)>1)snapSelection(G::sel[G::tabIndex]);
+    else {
+        float height=listBottom()-listTop(),step=ITEM_H+ITEM_GAP;
+        G::scrollTarget[G::tabIndex]=std::clamp(G::sel[G::tabIndex]*step-height/2+ITEM_H/2,0.0f,std::max(0.0f,n*step-height));
+        G::focusTarget=listTop()+G::sel[G::tabIndex]*step-G::scroll[G::tabIndex];
+    }
     if (G::sel[G::tabIndex] != before) G::dirty = true;   // 不重绘 = 看起来“翻不了页”
 }
 
 static void switchTab(int delta) {
+    if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta,0,26);G::dirty=true;return;}
     if (G::view == 1 || G::themePicker) return;
     int n = (int)G::tabs.size();
     if (n <= 1) return;
@@ -947,6 +1105,7 @@ static void switchTab(int delta) {
 }
 
 static void goBack() {
+    if(G::jumpPicker){G::jumpPicker=false;G::dirty=true;return;}
     if (G::themePicker) { G::themePicker = false; G::dirty = true; }
     else if (G::view == 1) { G::view = 0; G::dirty = true; G::pageAnim = 0; }
     else if (G::tabIndex == G::htmlTabIndex) { G::tabIndex = 1; G::dirty = true; }
@@ -959,6 +1118,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONUP: {
             int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
             if (G::captureHotkey) break;
+            if(G::closing || G::dialogOpen)break;
+            if(G::jumpPicker) {
+                for(size_t i=0;i<G::jumpCells.size();++i)if(G::jumpCells[i].Contains((float)x,(float)y)){jumpTo(G::jumpLetters[i]);break;}
+                break;
+            }
+            if(G::tabIndex==0 && G::view==0) {
+                bool handled=false;
+                for(size_t i=0;i<G::libraryActions.size();++i)if(G::libraryActions[i].Contains((float)x,(float)y)) {
+                    if(i==0)toggleFavorite();else if(i==1)openJumpPicker();else toggleFavoritesOnly();handled=true;break;
+                }
+                if(handled)break;
+            }
             if (G::themePicker) {
                 RectF sheet = themeSheetRect();
                 float rowH = (sheet.Height - 100 * S()) / ui::THEME_COUNT;
@@ -1025,13 +1196,19 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (wp == VK_ESCAPE) { G::captureHotkey = false; G::recordedMask = 0; G::recordArmed = false; G::dirty = true; }
                 break;
             }
-            if (wp == VK_ESCAPE) { if (G::themePicker) goBack(); else hidePanel(); }
+            if (wp == VK_ESCAPE) { if (G::themePicker || G::jumpPicker) goBack(); else hidePanel(); }
+            else if(wp==VK_F2)toggleFavorite();
+            else if(wp==VK_F3)openJumpPicker();
+            else if(wp==VK_F4)toggleFavoritesOnly();
+            else if(wp>=L'A' && wp<=L'Z' && G::view==0 && G::tabIndex==0)jumpTo((wchar_t)wp);
             else if (wp == VK_UP) navigate(-1);
             else if (wp == VK_DOWN) navigate(1);
             else if (wp == VK_LEFT) switchTab(-1);
             else if (wp == VK_RIGHT) switchTab(1);
             else if (wp == VK_RETURN) openSelected();
             else if (wp == VK_BACK) goBack();
+            else if(wp==VK_NEXT)navigate(std::max(1,(int)((listBottom()-listTop())/(ITEM_H+ITEM_GAP))));
+            else if(wp==VK_PRIOR)navigate(-std::max(1,(int)((listBottom()-listTop())/(ITEM_H+ITEM_GAP))));
             break;
         }
         case WM_HOTKEY: {
@@ -1142,6 +1319,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ULONG_PTR token = 0;
     GdiplusStartupInput gsi{};
     GdiplusStartup(&token, &gsi, nullptr);
+    G::iconCache.enableAsync();
     LOG("gdiplus ok");
 
     lib::loadConfig(G::cfg);
@@ -1294,6 +1472,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     delete G::backdrop;
     G::backdrop = nullptr;
     G::iconCache.clear(); G::imageCache.clear();
+    G::rowCache.clear();G::glassCache.reset();ui::fontCache.clear();
     releaseDib();
     GdiplusShutdown(token);
     CoUninitialize();
@@ -1354,6 +1533,9 @@ static void tickAnim(float elapsed = -1) {
 static void tickGamepad() {
     using gp::Btn;
     G::bridge.hotkey((WORD)G::cfg.hotkeyMask);
+    static unsigned lastIconRevision=0;
+    unsigned iconRevision=G::iconCache.revision();
+    if(iconRevision!=lastIconRevision){lastIconRevision=iconRevision;G::dirty=true;}
     static int lastInputFault=-1;
     int inputFault=G::bridge.fault();
     if(inputFault!=lastInputFault) {G::dirty=true;lastInputFault=inputFault;}
@@ -1445,7 +1627,7 @@ static void tickGamepad() {
     }
 
     if (G::waitForRelease) {
-        if (b == 0 && fabsf(G::pad.stickY(false, idx)) < 0.55f) G::waitForRelease = false;
+        if (gp::isNeutral(G::pad.state(idx).Gamepad)) G::waitForRelease = false;
         G::prevBtn = b; tickAnim(); return;
     }
 
@@ -1456,9 +1638,22 @@ static void tickGamepad() {
     }
     if (pressed & Btn::A) { openSelected(); G::prevBtn = b; tickAnim(); return; }
     if (pressed & Btn::START) { hidePanel(); G::prevBtn = b; return; }
+    if(G::view==0 && G::tabIndex==0 && !G::themePicker && !G::jumpPicker) {
+        if(pressed & Btn::Y){toggleFavorite();G::prevBtn=b;tickAnim();return;}
+        if(pressed & Btn::X){openJumpPicker();G::prevBtn=b;tickAnim();return;}
+        if(pressed & Btn::LTHUMB){toggleFavoritesOnly();G::prevBtn=b;tickAnim();return;}
+    }
     if (pressed & Btn::LB) switchTab(-1);
     if (pressed & Btn::RB) switchTab(1);
     if (G::view == 1 && (pressed & Btn::X)) { G::readerTarget = 0; G::dirty = true; }
+    if(G::view==0 && !G::jumpPicker && !G::themePicker) {
+        int direction=G::pad.trigger(gp::RT,idx)>100?1:G::pad.trigger(gp::LT,idx)>100?-1:0;
+        if(direction && (direction!=G::triggerDirection || now>=G::triggerRepeat)) {
+            navigate(direction*std::max(1,(int)((listBottom()-listTop())/(ITEM_H+ITEM_GAP))));
+            G::triggerRepeat=now+(direction!=G::triggerDirection?300u:150u);
+        }
+        G::triggerDirection=direction;
+    }
 
     // 十字键（带重复）
     int d = 0;
@@ -1475,6 +1670,11 @@ static void tickGamepad() {
 
     // 左摇杆
     float sy = G::pad.stickY(false, idx);
+    float sx = G::pad.stickX(false,idx);
+    if(G::jumpPicker && fabsf(sx)>0.55f && fabsf(sx)>fabsf(sy)) {
+        if(!G::stickConsumed || now>G::lastRepeat){switchTab(sx>0?1:-1);G::lastRepeat=now+(!G::stickConsumed?300u:110u);G::stickConsumed=true;}
+        G::prevBtn=b;tickAnim();return;
+    }
     if (fabsf(sy) > 0.55f) {
         if (!G::stickConsumed || now > G::lastRepeat) {
             navigate(gp::verticalDirection(sy));

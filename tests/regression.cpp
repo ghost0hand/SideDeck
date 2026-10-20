@@ -154,13 +154,49 @@ int main() {
         G::cfg.scale = 1.8f; ui::g_textScale = G::cfg.scale;
         G::focusReady = G::pillReady = false; G::sel[2] = 0; G::scroll[2] = 0;
         snapshot(root + L"/tools-large.png");
+        assert(libraryindex::initial(L"《剑星》")==L'J');
+        assert(libraryindex::initial(L"艾尔登法环")==L'A');
+        assert(libraryindex::initial(L"八方旅人")==L'B');
+        assert(libraryindex::initial(L"绯红结系")==L'F');
+        assert(libraryindex::initial(L"黑神话")==L'H');
+        assert(libraryindex::initial(L"只狼")==L'Z');
+        assert(libraryindex::initial(L"portal 2")==L'P');
+        assert(libraryindex::initial(L"123 Demo")==L'#');
+        const std::wstring samples=L"阿八刺底恶法古黑剑空龙魔尼欧匹七热赛泰巫星伊战",expected=L"ABCDEFGHJKLMNOPQRSTWXYZ";
+        assert(samples.size()==expected.size());
+        for(size_t i=0;i<samples.size();++i)assert(libraryindex::initial(samples.substr(i,1))==expected[i]);
+        assert(libraryindex::find({},L'A')==-1);
+        G::cfg.scale=1.35f;ui::g_textScale=G::cfg.scale;G::cfg.manual.clear();G::cfg.favorites.clear();
+        for(auto title:{L"剑星",L"只狼",L"艾尔登法环",L"八方旅人",L"绯红结系",L"黑神话",L"Portal 2",L"123 Demo"}) {
+            Item item;item.title=title;item.kind=lib::App;item.target=root+L"/"+title+L".exe";item.iconPath=root+L"/landscape.png";G::cfg.manual.push_back(item);
+        }
+        G::tabIndex=0;G::view=0;rebuildTabs();assert(G::tabs[0].items.size()==8);
+        assert(G::tabs[0].items.front().title==L"艾尔登法环" && G::tabs[0].items.back().title==L"123 Demo");
+        jumpTo(L'J');assert(G::tabs[0].items[G::sel[0]].title==L"剑星");
+        toggleFavorite();lib::Config favoriteSaved;lib::loadConfig(favoriteSaved);
+        assert(favoriteSaved.manual.size()==8 && favoriteSaved.favorites.size()==1);
+        Item sameGame=G::tabs[0].items[G::sel[0]];sameGame.target=lib::toLowerCp(sameGame.target);
+        assert(libraryindex::favorite(favoriteSaved,sameGame));
+        toggleFavoritesOnly();assert(G::tabs[0].items.size()==1 && G::tabs[0].items[0].pinned);
+        toggleFavorite();assert(G::tabs[0].items.empty());
+        toggleFavoritesOnly();assert(G::tabs[0].items.size()==8);
+        toggleFavorite();G::focusReady=G::pillReady=false;snapshot(root+L"/favorites.png");
+        openJumpPicker();assert(G::jumpPicker && G::jumpAvailable[9] && !G::jumpAvailable[2]);
+        snapshot(root+L"/letter-jump.png");
+        navigate(1);assert(G::jumpIndex==6);switchTab(1);assert(G::jumpIndex==7 && G::tabIndex==0);
+        jumpTo(L'J');assert(!G::jumpPicker && G::tabs[0].items[G::sel[0]].title==L"剑星");
+        WndProc(nullptr,WM_KEYDOWN,L'B',0);assert(G::tabs[0].items[G::sel[0]].title==L"八方旅人");
+        int beforeJump=G::sel[0];jumpTo(L'Q');assert(G::sel[0]==beforeJump);
+        {ui::IconCache background; background.enableAsync();assert(background.get(root+L"/landscape.png",48)==nullptr);
+         for(int wait=0;wait<200 && background.revision()==0;++wait)Sleep(5);
+         assert(background.revision()==1 && background.get(root+L"/landscape.png",48));background.clear();}
         writeText(lib::configPath(), R"({"theme":999,"scale":-8,"width":0,"margin":-3})");
         lib::Config bounds; lib::loadConfig(bounds);
         assert(bounds.theme == 3 && bounds.scale == 0.75f && bounds.width == 320 && bounds.margin == 0);
         DeleteFileW(lib::configPath().c_str());
         delete G::backdrop; G::backdrop = nullptr;
-        G::iconCache.clear(); G::imageCache.clear(); releaseDib();
+        G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: synthetic guides, image sizing, batch imports/order/duplicates/validation, neutral controller handoff, tabs, mouse navigation, themes, transparency, motion and cleanup");
+    puts("PASS: favorites persistence/filter/removal, pinyin/letter jumps, grid navigation, asynchronous icons, guides, imports, input handoff, themes, transparency and cleanup");
 }

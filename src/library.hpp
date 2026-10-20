@@ -53,6 +53,7 @@ struct Config {
     int theme = 0;
     std::wstring pauseKey;     // 呼出时向游戏发送的按键（如 esc）
     bool inputIsolation = false;
+    std::vector<std::wstring> favorites;
     std::vector<Item> manual;  // 手动添加
     std::vector<Tab> extraTabs;
 };
@@ -439,6 +440,8 @@ inline void loadConfig(Config& c) {
     c.theme = std::clamp(v.getInt("theme", 0), 0, ui::THEME_COUNT - 1);
     c.pauseKey = ui::utf8(v.getStr("pauseKey", ""));
     c.inputIsolation = v.getBool("inputIsolation", false);
+    c.favorites.clear();
+    if(v.has("favorites") && v["favorites"].isArr())for(auto& favorite:v["favorites"].arr)if(favorite.isStr())c.favorites.push_back(ui::utf8(favorite.str));
     if (v.has("scale")) c.scale = (float)v["scale"].numOr(1.35);
     if (!std::isfinite(c.scale)) c.scale = 1.35f;
     c.scale = std::clamp(c.scale, 0.75f, 2.5f);
@@ -494,6 +497,8 @@ inline void saveConfig(const Config& c) {
     v["theme"] = sj::Value(c.theme);
     v["pauseKey"] = sj::Value(ui::narrow(c.pauseKey));
     v["inputIsolation"] = sj::Value(c.inputIsolation);
+    sj::Array favorites;for(auto& favorite:c.favorites)favorites.push_back(sj::Value(ui::narrow(favorite)));
+    v["favorites"]=sj::Value(favorites);
     v["scale"] = sj::Value((double)c.scale);
     sj::Array man;
     for (auto& it : c.manual) {
