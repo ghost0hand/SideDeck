@@ -1,0 +1,17 @@
+{
+  "format": "sidedeck-theme",
+  "version": 1,
+  "name": "星雨霓蓝",
+  "description": "银发夜景 · 冷蓝透明玻璃",
+  "base": 0,
+  "colors": {
+    "glassTop": "#0B193846",
+    "glassBottom": "#0D172B9E",
+    "accentA": "#8DDFFF",
+    "accentB": "#C5C6FF",
+    "panelTop": "#152541E8"
+  },
+  "backdropOpacity": 0.25,
+  "background": "background.png",
+  "imageOpacity": 0.88
+}

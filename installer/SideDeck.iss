@@ -45,6 +45,16 @@ Source: "{#Root}THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}build\deps\ViGEmClient-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#Root}build\deps\HidHide-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
+Source: "{#Root}THEMES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}theme-packs\01-star-rain\theme.json"; DestDir: "{app}\themes\01-star-rain"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\01-star-rain\background.png"; DestDir: "{app}\themes\01-star-rain"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\02-sakura-moon\theme.json"; DestDir: "{app}\themes\02-sakura-moon"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\02-sakura-moon\background.png"; DestDir: "{app}\themes\02-sakura-moon"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\03-forest-firefly\theme.json"; DestDir: "{app}\themes\03-forest-firefly"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\03-forest-firefly\background.png"; DestDir: "{app}\themes\03-forest-firefly"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\04-amber-dusk\theme.json"; DestDir: "{app}\themes\04-amber-dusk"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}theme-packs\05-obsidian-gold\theme.json"; DestDir: "{app}\themes\05-obsidian-gold"; Flags: onlyifdoesntexist uninsneveruninstall
+
 [Icons]
 Name: "{group}\SideDeck"; Filename: "{app}\SideDeck.exe"
 Name: "{group}\Recover controller access"; Filename: "{app}\SideDeck.exe"; Parameters: "--recover-input"

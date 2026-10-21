@@ -1,0 +1,20 @@
+{
+  "format": "sidedeck-theme",
+  "version": 1,
+  "name": "森萤翡翠",
+  "description": "精灵湖畔 · 青绿雾面玻璃",
+  "base": 0,
+  "colors": {
+    "glassTop": "#09282446",
+    "glassBottom": "#0A24239E",
+    "accentA": "#9BE5C8",
+    "accentB": "#F0D9A6",
+    "panelTop": "#173732E8",
+    "textDim": "#D0E2D9",
+    "textFaint": "#AFC8BF",
+    "rim": "#DAFFF276"
+  },
+  "backdropOpacity": 0.25,
+  "background": "background.png",
+  "imageOpacity": 0.88
+}

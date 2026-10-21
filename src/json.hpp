@@ -78,6 +78,11 @@ public:
         Value v = parseValue();
         return v;
     }
+    Value parseStrict() {
+        auto value=parse();skipWs();
+        if(i_!=s_.size())throw std::runtime_error("json: trailing data");
+        return value;
+    }
 
 private:
     const std::string& s_;

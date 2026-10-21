@@ -24,6 +24,9 @@ New-Item -ItemType Directory -Path $stage,$output -Force | Out-Null
 # An allowlist deliberately prevents local guides/config/assets entering the release.
 $included = @('SideDeck.exe', 'SideDeck.InputProbe.exe', 'ViGEmClient.dll', 'README.md', 'CHANGELOG.md', 'VERSION', 'release.json', 'THIRD_PARTY_NOTICES.md',
     'drivers/HidHide_1.5.230_x64.exe', 'drivers/ViGEmBus_1.22.0_x64_x86_arm64.exe', 'licenses/ViGEmClient-LICENSE.txt', 'licenses/HidHide-LICENSE.txt')
+$themeFiles = @('01-star-rain/theme.json', '01-star-rain/background.png', '02-sakura-moon/theme.json', '02-sakura-moon/background.png', '03-forest-firefly/theme.json', '03-forest-firefly/background.png', '04-amber-dusk/theme.json', '05-obsidian-gold/theme.json')
+$included += @( $themeFiles | ForEach-Object { "themes/$_" } )
+$included += 'THEMES.md'
 if (Test-Path -LiteralPath $stage) {
     $unexpected = Get-ChildItem -LiteralPath $stage -Force -Recurse -File | Where-Object { [IO.Path]::GetRelativePath($stage, $_.FullName).Replace([IO.Path]::DirectorySeparatorChar,'/') -notin $included }
     if ($unexpected) { throw 'Package staging directory has unexpected files; use a fresh build directory.' }
@@ -41,6 +44,12 @@ foreach ($file in @('ViGEmClient-LICENSE.txt','HidHide-LICENSE.txt')) {
 foreach ($file in @('README.md', 'CHANGELOG.md', 'VERSION', 'THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $stage $file) -Force
 }
+foreach ($file in $themeFiles) {
+    $destination = Join-Path $stage "themes/$file"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $projectRoot "theme-packs/$file") -Destination $destination -Force
+}
+Copy-Item -LiteralPath (Join-Path $projectRoot 'THEMES.md') -Destination (Join-Path $stage 'THEMES.md') -Force
 $manifest = [ordered]@{ product = 'SideDeck'; version = $version; tag = $tag; commit = $commit; executable = 'SideDeck.exe'; sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() }
 [IO.File]::WriteAllText((Join-Path $stage 'release.json'), ($manifest | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 $zip = Join-Path $output "SideDeck-$tag-win-x64.zip"

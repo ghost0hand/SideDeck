@@ -69,3 +69,10 @@ foreach($file in @('ViGEmClient-LICENSE.txt','HidHide-LICENSE.txt')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "third_party/$file") -Destination (Join-Path $projectRoot "licenses/$file") -Force
 }
 Write-Host "Installed v$version as SideDeck.exe; personal config and guides retained."
+
+$themeFiles = @('01-star-rain/theme.json', '01-star-rain/background.png', '02-sakura-moon/theme.json', '02-sakura-moon/background.png', '03-forest-firefly/theme.json', '03-forest-firefly/background.png', '04-amber-dusk/theme.json', '05-obsidian-gold/theme.json')
+foreach ($file in $themeFiles) {
+    $destination = Join-Path $projectRoot "themes/$file"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+    if (!(Test-Path -LiteralPath $destination)) {Copy-Item -LiteralPath (Join-Path $projectRoot "theme-packs/$file") -Destination $destination}
+}

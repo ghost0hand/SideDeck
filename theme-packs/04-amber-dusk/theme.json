@@ -1,0 +1,18 @@
+{
+  "format": "sidedeck-theme",
+  "version": 1,
+  "name": "落日琥珀",
+  "description": "暖橙暮色 · 柔和琥珀玻璃",
+  "base": 1,
+  "colors": {
+    "glassTop": "#3D241278",
+    "glassBottom": "#231A16BA",
+    "accentA": "#FFC798",
+    "accentB": "#F9DEA8",
+    "panelTop": "#3D2C21EB",
+    "textDim": "#EAD5C6",
+    "textFaint": "#C6AB98",
+    "rim": "#FFE2C55C"
+  },
+  "backdropOpacity": 0.25
+}

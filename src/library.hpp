@@ -51,6 +51,7 @@ struct Config {
     bool hideOnFocusLost = true;
     float scale = 1.35f;       // UI 缩放（手持串流建议 1.3~1.6）
     int theme = 0;
+    std::wstring themeFile;
     std::wstring pauseKey;     // 呼出时向游戏发送的按键（如 esc）
     bool inputIsolation = false;
     std::vector<std::wstring> favorites;
@@ -168,16 +169,17 @@ inline ImportResult addManualFiles(Config& config, const std::vector<std::wstrin
     return result;
 }
 
-inline HRESULT chooseGameFiles(HWND owner, std::vector<std::wstring>& paths) {
+inline HRESULT chooseGameFiles(HWND owner, std::vector<std::wstring>& paths, bool themeFiles=false) {
     IFileOpenDialog* dialog = nullptr;
     HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
     if (FAILED(result)) return result;
     DWORD options = 0;
     result = dialog->GetOptions(&options);
     if (SUCCEEDED(result)) result = dialog->SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+    const COMDLG_FILTERSPEC themeFilter[] = {{L"SideDeck 主题包", L"*.json"}};
     const COMDLG_FILTERSPEC filters[] = {{L"游戏与快捷方式", L"*.exe;*.lnk;*.url"}, {L"可执行文件", L"*.exe"}, {L"快捷方式", L"*.lnk;*.url"}};
-    if (SUCCEEDED(result)) result = dialog->SetFileTypes(3, filters);
-    if (SUCCEEDED(result)) result = dialog->SetTitle(L"批量添加游戏 · Ctrl / Shift 多选");
+    if (SUCCEEDED(result)) result = dialog->SetFileTypes(themeFiles ? 1 : 3, themeFiles ? themeFilter : filters);
+    if (SUCCEEDED(result)) result = dialog->SetTitle(themeFiles ? L"导入主题 · 选择包内的 theme.json（可多选）" : L"批量添加游戏 · Ctrl / Shift 多选");
     if (SUCCEEDED(result)) result = dialog->Show(owner);
     IShellItemArray* selection = nullptr;
     if (SUCCEEDED(result)) result = dialog->GetResults(&selection);
@@ -437,6 +439,7 @@ inline void loadConfig(Config& c) {
     c.scanEpic = v.getBool("scanEpic", c.scanEpic);
     c.scanStartMenu = v.getBool("scanStartMenu", c.scanStartMenu);
     c.hideOnFocusLost = v.getBool("hideOnFocusLost", c.hideOnFocusLost);
+    c.themeFile = ui::utf8(v.getStr("themeFile"));
     c.theme = std::clamp(v.getInt("theme", 0), 0, ui::THEME_COUNT - 1);
     c.pauseKey = ui::utf8(v.getStr("pauseKey", ""));
     c.inputIsolation = v.getBool("inputIsolation", false);
@@ -495,6 +498,7 @@ inline void saveConfig(const Config& c) {
     v["scanStartMenu"] = sj::Value(c.scanStartMenu);
     v["hideOnFocusLost"] = sj::Value(c.hideOnFocusLost);
     v["theme"] = sj::Value(c.theme);
+    v["themeFile"] = sj::Value(ui::narrow(c.themeFile));
     v["pauseKey"] = sj::Value(ui::narrow(c.pauseKey));
     v["inputIsolation"] = sj::Value(c.inputIsolation);
     sj::Array favorites;for(auto& favorite:c.favorites)favorites.push_back(sj::Value(ui::narrow(favorite)));

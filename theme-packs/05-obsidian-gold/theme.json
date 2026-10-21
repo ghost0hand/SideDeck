@@ -1,0 +1,18 @@
+{
+  "format": "sidedeck-theme",
+  "version": 1,
+  "name": "黑金曜石",
+  "description": "深色低饱和 · 细金高光",
+  "base": 2,
+  "colors": {
+    "glassTop": "#211E188C",
+    "glassBottom": "#151512C2",
+    "accentA": "#E7CC8B",
+    "accentB": "#E7E0CC",
+    "panelTop": "#29271FEB",
+    "textDim": "#D8D2C3",
+    "textFaint": "#B7AF9C",
+    "rim": "#F5E5B74C"
+  },
+  "backdropOpacity": 0.25
+}

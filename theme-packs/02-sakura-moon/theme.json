@@ -1,0 +1,17 @@
+{
+  "format": "sidedeck-theme",
+  "version": 1,
+  "name": "樱月琉璃",
+  "description": "樱花月夜 · 柔紫粉晶玻璃",
+  "base": 1,
+  "colors": {
+    "glassTop": "#27152E46",
+    "glassBottom": "#29192C9E",
+    "accentA": "#F3B5D4",
+    "accentB": "#E2CBFF",
+    "panelTop": "#39243EE8"
+  },
+  "backdropOpacity": 0.25,
+  "background": "background.png",
+  "imageOpacity": 0.88
+}

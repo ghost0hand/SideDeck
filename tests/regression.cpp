@@ -235,13 +235,61 @@ int main() {
         assert(scrollPixels(150,true) && G::readerScroll==250);
         scrollPixels(1000,true);assert(G::readerScroll==500);scrollPixels(-1000,true);assert(G::readerScroll==0);
         cancelTouch();G::view=0;
+        // Import must be self-contained, reject malformed data and preserve stable selection.
+        auto fixtures=std::filesystem::path(root)/(L"theme-fixtures-"+std::to_wstring(GetTickCount64()));
+        std::filesystem::create_directories(fixtures/L"source");
+        auto source=fixtures/L"source"/L"theme.json";
+        savePng(portrait,(fixtures/L"source"/L"art.png").wstring());
+        std::string valid=R"({"format":"sidedeck-theme","version":1,"name":"Test glass","base":1,"background":"art.png","colors":{"accentA":"#12ABEF","glassTop":"#12345678"},"imageOpacity":0.8})";
+        writeText(source.wstring(),valid);themes::Entry entry;
+        assert(themes::load(source,entry) && entry.palette.accentA.g==0xAB && entry.palette.glassTop.a==0x78);
+        auto imports=fixtures/L"imports";std::wstring key,secondKey;
+        assert(themes::import(source,imports,key));assert(themes::import(source,imports,secondKey) && key!=secondKey);
+        std::filesystem::remove(fixtures/L"source"/L"art.png");
+        assert(themes::load(imports/key,entry)); // source files are no longer required
+        themes::reload(imports);assert(themes::count()==6);
+        int importedTheme=themes::selected(0,key);assert(importedTheme>=4);
+        applyTheme(importedTheme);lib::Config restored;lib::loadConfig(restored);
+        assert(restored.themeFile==key && restored.theme==1 && G::themeImage);
+        std::filesystem::create_directories(imports/L"aaa");
+        writeText((imports/L"aaa"/L"theme.json").wstring(),R"({"format":"sidedeck-theme","version":1,"name":"Sorted first"})");
+        themes::reload(imports);assert(themes::selected(restored.theme,restored.themeFile)!=importedTheme);
+        assert(themes::get(themes::selected(restored.theme,restored.themeFile)).key==key);
+        G::themePicker=true;G::themePick=0;navigate(4);assert(themePageStart()==4);
+        sheet=themeSheetRect();
+        WndProc(nullptr,WM_SIDEDECK_TAP,0,MAKELPARAM((int)(sheet.X+24*S()),(int)(sheet.GetBottom()-20*S())));
+        assert(G::themePick==0); // touch previous page
+        WndProc(nullptr,WM_SIDEDECK_TAP,0,MAKELPARAM((int)(sheet.GetRight()-24*S()),(int)(sheet.GetBottom()-20*S())));
+        assert(G::themePick==4);goBack();
+        for(auto bad:{
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad","background":"../secret.png"})",
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad","imageOpacity":2})",
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad","base":0.5})",
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad","colors":{"text":"#gggggg"}})",
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad","colors":{"unknown":"#FFFFFF"}})",
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad"} garbage)"}) {
+            writeText(source.wstring(),bad);assert(!themes::load(source,entry));assert(!themes::import(source,imports,secondKey));
+        }
+        writeText(source.wstring(),std::string(33000,' '));assert(!themes::load(source,entry));
+        std::string deep(100,'[');deep+=std::string(100,']');writeText(source.wstring(),deep);assert(!themes::load(source,entry));
+        // Render every shipping theme with synthetic content, no personal library.
+        themes::reload(std::filesystem::path(root)/L".."/L".."/L"theme-packs");assert(themes::count()==9);
+        G::view=0;G::tabIndex=2;G::scroll[2]=G::scrollTarget[2]=0;G::sel[2]=0;G::cfg.scale=1;ui::g_textScale=1;
+        G::W=540;G::H=960;G::toastT=0;G::anim=G::pageAnim=1;G::themePicker=false;
+        for(int i=4;i<themes::count();++i){
+            applyTheme(i);G::themeProgress=1;ui::theme()=currentThemeEntry().palette;G::toastT=0;
+            G::focusReady=G::pillReady=false;
+            snapshot(root+L"/pack-"+std::to_wstring(i)+L".png");
+        }
+        G::themePicker=true;G::themePick=4;snapshot(root+L"/theme-picker-page2.png");G::themePicker=false;
+        G::themeImage.reset();G::cfg.themeFile.clear();themes::reload(fixtures/L"empty");
         writeText(lib::configPath(), R"({"theme":999,"scale":-8,"width":0,"margin":-3})");
         lib::Config bounds; lib::loadConfig(bounds);
         assert(bounds.theme == 3 && bounds.scale == 0.75f && bounds.width == 320 && bounds.margin == 0);
         DeleteFileW(lib::configPath().c_str());
         delete G::backdrop; G::backdrop = nullptr;
-        G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();ui::fontCache.clear(); releaseDib();
+        G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();G::themeImage.reset();ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: touch/mouse drag, tap suppression, inertia, scroll limits, reader scroll, controller handoff, favorites, pinyin, asynchronous icons, guides and cleanup");
+    puts("PASS: theme import, validation, image copy, stable selection, paging, theme renders, touch/mouse drag, tap suppression, inertia, scroll limits, reader scroll, controller handoff, favorites, pinyin, asynchronous icons, guides and cleanup");
 }

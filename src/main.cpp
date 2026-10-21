@@ -33,6 +33,7 @@
 #include "input_bridge.hpp"
 #include "library_index.hpp"
 #include "touch_scroll.hpp"
+#include "themes.hpp"
 
 using namespace Gdiplus;
 using lib::Item;
@@ -85,6 +86,7 @@ float tabPillX = 0, tabPillW = 0, tabPillTargetX = 0, tabPillTargetW = 0;
 bool pillReady = false;
 bool themePicker = false;
 int themePick = 0;
+std::unique_ptr<Bitmap> themeImage;
 ui::Theme themeFrom;
 float themeProgress = 1;
 bool animating = false;
@@ -255,7 +257,7 @@ static void paintItemCard(Graphics& g, const Item& it, float x, float y, float w
     float ix = x + pad, iy = y + pad;
     ui::ToolGlyph glyph = ui::ToolGlyph::None;
     if (it.kind == lib::Command) {
-        if (it.target == L"__theme__") glyph = ui::ToolGlyph::Settings;
+        if (it.target == L"__theme__" || it.target==L"__importtheme__" || it.target==L"__themedir__") glyph = ui::ToolGlyph::Settings;
         else if (it.target == L"__isolation__") glyph = ui::ToolGlyph::Gamepad;
         else if (it.target == L"__hotkey__") glyph = ui::ToolGlyph::Gamepad;
         else if (it.target == L"__addgames__") glyph = ui::ToolGlyph::Folder;
@@ -395,6 +397,19 @@ static void drawReader(Graphics& g, float w, float h) {
     G::readerScroll = std::clamp(G::readerScroll,0.0f,G::readerMaxScroll);
 }
 
+static std::filesystem::path themeDirectory(){return std::filesystem::path(lib::appDir())/L"themes";}
+static int currentTheme(){return themes::selected(G::cfg.theme,G::cfg.themeFile);}
+static const themes::Entry& currentThemeEntry(){return themes::get(currentTheme());}
+static void loadThemeImage(){
+    G::themeImage.reset();G::rowCache.clear();G::glassCache.reset();
+    const auto& entry=currentThemeEntry();
+    if(!entry.image.empty()){
+        auto image=std::make_unique<Bitmap>(entry.image.c_str());
+        if(image->GetLastStatus()==Ok)G::themeImage=std::move(image);
+    }
+}
+static constexpr int THEME_PAGE_ROWS=4;
+static int themePageStart(){return G::themePick/THEME_PAGE_ROWS*THEME_PAGE_ROWS;}
 static RectF themeSheetRect() {
     float height = std::min(410 * S(), (float)G::H - 32 * S());
     return RectF(PADX, (G::H - height) / 2, G::W - PADX * 2, height);
@@ -408,31 +423,31 @@ static void drawThemePicker(Graphics& g) {
     ui::drawRoundRect(g, T.rim, sheet.X, sheet.Y, sheet.Width, sheet.Height, 22 * S());
     ui::TextStyle title; title.size = 17; title.bold = true;
     ui::drawText(g, L"选择外观", sheet.X + 20 * S(), sheet.Y + 15 * S(), sheet.Width - 40 * S(), 30 * S(), title);
-    float rowH = (sheet.Height - 100 * S()) / ui::THEME_COUNT;
-    for (int i = 0; i < ui::THEME_COUNT; ++i) {
-        float y = sheet.Y + 58 * S() + i * rowH;
+    float rowH = (sheet.Height - 100 * S()) / THEME_PAGE_ROWS;
+    for (int i = themePageStart(); i < std::min(themePageStart()+THEME_PAGE_ROWS,themes::count()); ++i) {
+        float y = sheet.Y + 58 * S() + (i-themePageStart()) * rowH;
         float x = sheet.X + 12 * S(), width = sheet.Width - 24 * S();
         if (i == G::themePick) {
             ui::fillRoundRect(g, T.selBg, x, y, width, rowH - 5 * S(), 14 * S());
             ui::drawRoundRect(g, T.sep, x, y, width, rowH - 5 * S(), 14 * S());
         }
-        auto swatch = ui::themePreset(i);
+        auto swatch = themes::get(i).palette;
         float side = std::min(42 * S(), rowH - 18 * S());
         float sx = x + 12 * S(), sy = y + (rowH - 5 * S() - side) / 2;
         ui::fillRoundRect(g, swatch.glassBottom.withA(255), sx, sy, side, side, 12 * S());
         ui::fillRoundRect(g, swatch.accentA.withA(150), sx + side * 0.18f, sy + side * 0.22f, side * 0.64f, side * 0.22f, 4 * S());
         ui::fillRoundRect(g, swatch.selBg.withA(120), sx + side * 0.18f, sy + side * 0.58f, side * 0.44f, side * 0.14f, 3 * S());
         ui::TextStyle name; name.size = 14; name.bold = i == G::themePick;
-        ui::drawText(g, ui::themeName(i), sx + side + 14 * S(), y + 7 * S(), width - side - 86 * S(), 25 * S(), name);
+        ui::drawText(g, themes::get(i).name, sx + side + 14 * S(), y + 7 * S(), width - side - 86 * S(), 25 * S(), name);
         ui::TextStyle detail; detail.size = 10.5f; detail.color = T.textDim;
-        ui::drawText(g, ui::themeDescription(i), sx + side + 14 * S(), y + 32 * S(), width - side - 40 * S(), 19 * S(), detail);
-        if (i == G::cfg.theme) {
+        ui::drawText(g, themes::get(i).description, sx + side + 14 * S(), y + 32 * S(), width - side - 40 * S(), 19 * S(), detail);
+        if (i == currentTheme()) {
             ui::TextStyle current; current.size = 9; current.color = T.accentB; current.halign = StringAlignmentFar;
             ui::drawText(g, L"当前", x + width - 48 * S(), y + 9 * S(), 36 * S(), 20 * S(), current);
         }
     }
     ui::TextStyle hint; hint.size = 10.5f; hint.color = T.textDim; hint.halign = StringAlignmentCenter;
-    ui::drawText(g, L"↑↓ 选择    A 应用    B 返回", sheet.X, sheet.GetBottom() - 34 * S(), sheet.Width, 23 * S(), hint);
+    ui::drawText(g, (L"‹ 上页    "+std::to_wstring(G::themePick/4+1)+L" / "+std::to_wstring((themes::count()+3)/4)+L"    下页 ›"), sheet.X, sheet.GetBottom() - 34 * S(), sheet.Width, 23 * S(), hint);
 }
 
 static void drawJumpPicker(Graphics& g) {
@@ -475,6 +490,12 @@ static void drawPanel(Graphics& g) {
     if (G::backdrop) {
         ui::drawImageOpacity(g, G::backdrop, 0, 0, w, h, T.backdropOpacity);
     }
+    if(G::themeImage) {
+        // Cover crop with preserved aspect ratio; cached together with the glass.
+        auto image=G::themeImage.get();float iw=(float)image->GetWidth(),ih=(float)image->GetHeight();
+        float scale=std::max(w/iw,h/ih);
+        ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
+    }
     {
         LinearGradientBrush br(PointF(0, 0), PointF(0, h),
             T.glassTop.gd(), T.glassBottom.gd());
@@ -502,7 +523,7 @@ static void drawPanel(Graphics& g) {
         ui::TextStyle logo; logo.size = 13; logo.bold = true; logo.color = T.text;
         ui::drawText(g, L"SIDEDECK", PADX + 4 * S(), 18 * S(), 170 * S(), 28 * S(), logo);
         ui::TextStyle label; label.size = 9.5f; label.color = T.textDim;
-        ui::drawText(g, std::wstring(L"v") + SIDEDECK_VERSION_W + L" · " + ui::themeName(G::cfg.theme), PADX + 4 * S(), 46 * S(), 200 * S(), 20 * S(), label);
+        ui::drawText(g, std::wstring(L"v") + SIDEDECK_VERSION_W + L" · " + currentThemeEntry().name, PADX + 4 * S(), 46 * S(), 200 * S(), 20 * S(), label);
     }
     // 右侧：手柄状态
     std::wstring status;
@@ -851,7 +872,7 @@ static void rebuildTabs() {
 
     Tab tools; tools.name = L"工具";
     Item appearance; appearance.title = L"外观主题";
-    appearance.subtitle = std::wstring(ui::themeName(G::cfg.theme)) + L" · A 选择";
+    appearance.subtitle = currentThemeEntry().name + L" · A 选择";
     appearance.target = L"__theme__"; appearance.kind = lib::Command;
     tools.items.push_back(appearance);
     Item hk; hk.title = L"呼出组合键"; hk.subtitle = L"当前：" + gp::Input::buttonNames((WORD)G::cfg.hotkeyMask);
@@ -870,6 +891,8 @@ static void rebuildTabs() {
     tools.items.push_back(gd);
     Item cf; cf.title = L"编辑配置文件"; cf.subtitle = lib::configPath(); cf.target = L"__editconfig__"; cf.kind = lib::Command;
     tools.items.push_back(cf);
+    Item ti;ti.title=L"导入主题包";ti.subtitle=L"选择 theme.json · 配色和背景一并导入";ti.target=L"__importtheme__";ti.kind=lib::Command;tools.items.push_back(ti);
+    Item td;td.title=L"打开主题目录";td.subtitle=L"放入主题包后，重新打开外观主题即可刷新";td.target=L"__themedir__";td.kind=lib::Command;tools.items.push_back(td);
     G::tabs.push_back(tools);
 
     for (auto& t : G::cfg.extraTabs) G::tabs.push_back(t);
@@ -931,14 +954,31 @@ static void jumpTo(wchar_t letter) {
 }
 
 static void applyTheme(int id) {
-    id = std::clamp(id, 0, ui::THEME_COUNT - 1);
+    id = std::clamp(id, 0, themes::count() - 1);
     G::themeFrom = ui::theme(); G::themeProgress = 0;
-    G::cfg.theme = id;
+    G::cfg.theme = themes::get(id).base;
+    G::cfg.themeFile = themes::get(id).key;
+    loadThemeImage();
     for (auto& tab : G::tabs) for (auto& item : tab.items) {
-        if (item.target == L"__theme__") item.subtitle = std::wstring(ui::themeName(id)) + L" · A 选择";
+        if (item.target == L"__theme__") item.subtitle = themes::get(id).name + L" · A 选择";
     }
     G::themePicker = false;
-    saveCfg(); toast(std::wstring(L"外观已切换 · ") + ui::themeName(id));
+    saveCfg(); toast(std::wstring(L"外观已切换 · ") + themes::get(id).name);
+}
+
+static void importThemes(const std::vector<std::wstring>& paths){
+    int added=0;std::wstring last;
+    for(auto& path:paths){std::wstring key;if(themes::import(path,themeDirectory(),key)){++added;last=key;}}
+    themes::reload(themeDirectory());
+    if(added){applyTheme(themes::selected(0,last));G::themePick=currentTheme();}
+    toast(L"已导入 "+std::to_wstring(added)+L" 个主题"+(added<(int)paths.size()?L" · 部分文件无效或无法复制":L""));
+}
+static void chooseThemes(){
+    if(G::dialogOpen)return;
+    G::dialogOpen=true;std::vector<std::wstring> paths;
+    auto result=lib::chooseGameFiles(G::hwnd,paths,true);G::dialogOpen=false;G::waitForRelease=true;
+    if(SUCCEEDED(result)&&!paths.empty())importThemes(paths);
+    else if(result!=HRESULT_FROM_WIN32(ERROR_CANCELLED)&&FAILED(result))toast(L"无法打开主题选择器");
 }
 
 static void addGames(const std::vector<std::wstring>& paths) {
@@ -1016,8 +1056,15 @@ static void openSelected() {
     LOG("openSelected called");
     if (items.empty()) return;
     Item it = items[G::sel[G::tabIndex]];
+    if(it.target==L"__importtheme__"){chooseThemes();return;}
+    if(it.target==L"__themedir__"){
+        std::error_code ec;std::filesystem::create_directories(themeDirectory(),ec);
+        ShellExecuteW(G::hwnd,L"open",themeDirectory().c_str(),nullptr,nullptr,SW_SHOWNORMAL);return;
+    }
     if (it.target == L"__theme__") {
-        G::themePicker = true; G::themePick = G::cfg.theme; G::dirty = true; return;
+        G::themePicker = true; themes::reload(themeDirectory());loadThemeImage();
+        ui::theme()=currentThemeEntry().palette;G::themeProgress=1;
+        G::themePick = currentTheme(); G::dirty = true; return;
     }
 #ifdef DEBUG_LOG
     fwprintf(stderr, L"[LOG] open: %ls kind=%d\n", it.title.c_str(), it.kind); fflush(stderr);
@@ -1091,7 +1138,7 @@ static void navigate(int delta) {
     cancelTouch(G::hwnd);
     if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta*6,0,26);G::dirty=true;return;}
     if (G::themePicker) {
-        G::themePick = std::clamp(G::themePick + delta, 0, ui::THEME_COUNT - 1);
+        G::themePick = std::clamp(G::themePick + delta, 0, themes::count() - 1);
         G::dirty = true; return;
     }
     if (G::view == 1) {
@@ -1270,10 +1317,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             if (G::themePicker) {
                 RectF sheet = themeSheetRect();
-                float rowH = (sheet.Height - 100 * S()) / ui::THEME_COUNT;
+                float rowH = (sheet.Height - 100 * S()) / THEME_PAGE_ROWS;
                 float top = sheet.Y + 58 * S();
-                if (x >= sheet.X + 12 * S() && x <= sheet.GetRight() - 12 * S() && y >= top && y < top + rowH * ui::THEME_COUNT) {
-                    applyTheme((int)((y - top) / rowH));
+                if (x >= sheet.X + 12 * S() && x <= sheet.GetRight() - 12 * S() && y >= top && y < top + rowH * THEME_PAGE_ROWS) {
+                    int index=themePageStart()+(int)((y-top)/rowH);
+                    if(index<themes::count())applyTheme(index);
+                } else if(sheet.Contains((float)x,(float)y) && y>=sheet.GetBottom()-38*S()){
+                    G::themePick=std::clamp(themePageStart()+(x<sheet.X+sheet.Width/2?-4:4),0,themes::count()-1);G::dirty=true;
                 } else if (!sheet.Contains((float)x, (float)y)) { G::themePicker = false; G::dirty = true; }
                 break;
             }
@@ -1315,7 +1365,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (DragQueryFileW(hd, i, buffer.data(), (UINT)buffer.size())) paths.emplace_back(buffer.data());
             }
             DragFinish(hd);
-            addGames(paths);
+            std::vector<std::wstring> themePaths,gamePaths;
+            for(auto& path:paths){auto ext=lib::toLowerCp(std::filesystem::path(path).extension().wstring());(ext==L".json"?themePaths:gamePaths).push_back(path);}
+            if(!gamePaths.empty())addGames(gamePaths);
+            if(!themePaths.empty())importThemes(themePaths);
             break;
         }
         case WM_MOUSEWHEEL: {
@@ -1460,7 +1513,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     LOG("gdiplus ok");
 
     lib::loadConfig(G::cfg);
-    ui::theme() = ui::themePreset(G::cfg.theme);
+    themes::reload(themeDirectory());loadThemeImage();
+    ui::theme() = currentThemeEntry().palette;
     ui::g_textScale = G::cfg.scale;
     LOG("config loaded");
     // 首次运行：写一份默认配置 + 示例攻略
@@ -1609,7 +1663,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     delete G::backdrop;
     G::backdrop = nullptr;
     G::iconCache.clear(); G::imageCache.clear();
-    G::rowCache.clear();G::glassCache.reset();ui::fontCache.clear();
+    G::rowCache.clear();G::glassCache.reset();G::themeImage.reset();ui::fontCache.clear();
     releaseDib();
     GdiplusShutdown(token);
     CoUninitialize();
@@ -1647,7 +1701,7 @@ static void tickAnim(float elapsed = -1) {
     if (G::pageAnim < 1) { G::pageAnim = std::min(1.0f, G::pageAnim + dt / 0.20f); need = true; }
     if (G::themeProgress < 1) {
         G::themeProgress = std::min(1.0f, G::themeProgress + dt / 0.28f);
-        ui::theme() = ui::mixTheme(G::themeFrom, ui::themePreset(G::cfg.theme), ui::easeOutCubic(G::themeProgress));
+        ui::theme() = ui::mixTheme(G::themeFrom, currentThemeEntry().palette, ui::easeOutCubic(G::themeProgress));
         need = true;
     }
     if(!G::closing) {

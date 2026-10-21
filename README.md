@@ -103,3 +103,9 @@ git push origin v0.1.1
 - .github/workflows/：tag 触发的发布流程。
 - build/、releases/、backups/：本机构建、发布包和旧文件备份，均不提交。
 - config.json、guides/、map_imgs/、suit_imgs/、根目录 HTML：本地个人数据，均不提交。
+
+## 可导入主题（0.3.3）
+
+工具 → 外观主题可选择原有四套主题，以及新增的星雨霓蓝、樱月琉璃、森萤翡翠、落日琥珀、黑金曜石。前三套附带二次元插画背景。
+
+工具 → 导入主题包，选择解压后的 `theme.json`，会同时导入同目录背景图；也支持多选和拖入。之后增加主题无需改代码或升级版本。格式和说明见 [THEMES.md](THEMES.md)。
