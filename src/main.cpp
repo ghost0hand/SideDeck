@@ -1142,7 +1142,12 @@ static void goBack() {
 }
 
 // ==================== 窗口过程 ====================
-static double touchTime() {return GetTickCount64()/1000.0;}
+static double touchTime() {
+    static LARGE_INTEGER frequency=[] {LARGE_INTEGER value{};QueryPerformanceFrequency(&value);return value;}();
+    LARGE_INTEGER counter{};
+    if(frequency.QuadPart>0 && QueryPerformanceCounter(&counter))return (double)counter.QuadPart/frequency.QuadPart;
+    return GetTickCount64()/1000.0;
+}
 static void cancelTouch(HWND window) {
     if(G::touch.active && G::touchPointer==0)G::cancelledMouseTap=true;
     G::touch.cancel();G::touchPointer=0;
