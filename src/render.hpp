@@ -8,6 +8,7 @@
 #include <propidl.h>
 #include <gdiplus.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <commctrl.h>
 #include <commoncontrols.h>
@@ -471,6 +472,29 @@ private:
         if (size <= 0) return nullptr;
         // URL：无图标
         if (lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0) return nullptr;
+
+        if(lower.size()>=4 && lower.substr(lower.size()-4)==L".lnk") {
+            // Avoid loading third-party Shell icon extensions into the panel.
+            IShellLinkW* link=nullptr;Bitmap* result=nullptr;
+            if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&link)))) {
+                IPersistFile* file=nullptr;
+                if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+                    if(SUCCEEDED(file->Load(path.c_str(),STGM_READ))) {
+                        wchar_t resource[32768]{};int index=0;
+                        link->GetIconLocation(resource,32768,&index);
+                        if(!resource[0]){link->GetPath(resource,32768,nullptr,SLGP_RAWPATH);index=0;}
+                        wchar_t expanded[32768]{};ExpandEnvironmentStringsW(resource,expanded,32768);
+                        HICON icon=nullptr;if(expanded[0])ExtractIconExW(expanded,index,&icon,nullptr,1);
+                        if(icon){auto source=Bitmap::FromHICON(icon);DestroyIcon(icon);
+                            if(source && source->GetLastStatus()==Ok)result=scale(source,size);
+                            delete source;}
+                    }
+                    file->Release();
+                }
+                link->Release();
+            }
+            return result;
+        }
 
         // 某些游戏 exe 能读取图标资源，但 Shell 图标服务返回失败。直接提取后再回退到 Shell。
         if (lower.size() >= 4 && (lower.substr(lower.size() - 4) == L".exe" || lower.substr(lower.size() - 4) == L".ico")) {

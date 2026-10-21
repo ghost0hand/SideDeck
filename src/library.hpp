@@ -371,7 +371,7 @@ inline std::vector<Item> scanStartMenu() {
         Item it;
         it.title = lp.stem().wstring();
         it.subtitle = L"开始菜单";
-        it.target = t;
+        it.target = lp.wstring(); // Retain the link's arguments and Start in.
         it.kind = App;
         out.push_back(it);
     }
@@ -545,25 +545,89 @@ inline void saveConfig(const Config& c) {
 }
 
 // ---------------- 启动 ----------------
-inline void launch(const Item& it) {
-    if (it.target.empty()) return;
-    if (it.kind == Url || it.target.rfind(L"http://", 0) == 0 || it.target.rfind(L"https://", 0) == 0) {
-        ShellExecuteW(nullptr, L"open", it.target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        return;
+struct LaunchRequest {
+    std::wstring file, parameters, directory, executable, arguments;
+    int show=SW_SHOWNORMAL;
+};
+inline std::wstring expandEnvironment(const std::wstring& value) {
+    if(value.empty())return {};
+    DWORD size=ExpandEnvironmentStringsW(value.c_str(),nullptr,0);
+    if(!size || size>32768)return value;
+    std::vector<wchar_t> expanded(size);
+    DWORD written=ExpandEnvironmentStringsW(value.c_str(),expanded.data(),size);
+    return written && written<=size?std::wstring(expanded.data()):value;
+}
+inline LaunchRequest prepareLaunch(const Item& it) {
+    LaunchRequest request;request.file=it.target;
+    if(it.kind==Url || PathIsURLW(it.target.c_str()))return request;
+    if(it.kind==Command && it.target.rfind(L"cmd:",0)==0) {
+        request.file=L"cmd.exe";request.parameters=L"/c "+it.target.substr(4);request.show=SW_HIDE;return request;
     }
-    if (it.kind == Command) {
-        // 支持 cmd: 前缀
-        std::wstring t = it.target;
-        if (t.rfind(L"cmd:", 0) == 0) {
-            std::wstring cmd = t.substr(4);
-            ShellExecuteW(nullptr, L"open", L"cmd.exe", (L"/c " + cmd).c_str(), nullptr, SW_HIDE);
-            return;
+    auto extension=toLowerCp(fs::path(it.target).extension().wstring());
+    if(extension==L".lnk") {
+        // Execute the original link to preserve arguments, elevation and window
+        // state. The shortcut folder is never the game's working directory.
+        IShellLinkW* link=nullptr;
+        if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&link)))) {
+            IPersistFile* persist=nullptr;
+            if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&persist)))) {
+                if(SUCCEEDED(persist->Load(it.target.c_str(),STGM_READ))) {
+                    std::vector<wchar_t> buffer(32768);
+                    if(SUCCEEDED(link->GetWorkingDirectory(buffer.data(),(int)buffer.size())))request.directory=expandEnvironment(buffer.data());
+                    if(request.directory.empty() && SUCCEEDED(link->GetPath(buffer.data(),(int)buffer.size(),nullptr,SLGP_RAWPATH))) {
+                        std::wstring target=expandEnvironment(buffer.data());
+                        if(!target.empty() && !PathIsRelativeW(target.c_str()) && !PathIsURLW(target.c_str()))request.directory=fs::path(target).parent_path().wstring();
+                    }
+                    // Common executable links need no Shell extension at all.
+                    DWORD flags=0;IShellLinkDataList* data=nullptr;
+                    if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&data)))){data->GetFlags(&flags);data->Release();}
+                    if(!(flags&(SLDF_RUNAS_USER|SLDF_HAS_DARWINID))) {
+                        buffer[0]=0;
+                        if(SUCCEEDED(link->GetPath(buffer.data(),(int)buffer.size(),nullptr,SLGP_RAWPATH))) {
+                            auto target=expandEnvironment(buffer.data());
+                            if(toLowerCp(fs::path(target).extension().wstring())==L".exe" && !PathIsRelativeW(target.c_str())) {
+                                request.executable=target;buffer[0]=0;
+                                if(SUCCEEDED(link->GetArguments(buffer.data(),(int)buffer.size())))request.arguments=buffer.data();
+                                link->GetShowCmd(&request.show);
+                            }
+                        }
+                    }
+                }
+                persist->Release();
+            }
+            link->Release();
         }
+        return request;
     }
-    std::wstring dir;
-    auto pos = it.target.find_last_of(L"\\/");
-    if (pos != std::wstring::npos) dir = it.target.substr(0, pos);
-    ShellExecuteW(nullptr, L"open", it.target.c_str(), nullptr, dir.empty() ? nullptr : dir.c_str(), SW_SHOWNORMAL);
+    if(extension!=L".url")request.directory=fs::path(it.target).parent_path().wstring();
+    if(extension==L".exe")request.executable=it.target;
+    return request;
+}
+// Returns the Windows error; optional process handle is owned by the caller.
+inline DWORD launch(const Item& it,HWND owner=nullptr,HANDLE* process=nullptr) {
+    if(process)*process=nullptr;
+    if(it.target.empty())return ERROR_INVALID_PARAMETER;
+    auto request=prepareLaunch(it);
+    if(!request.executable.empty()) {
+        std::wstring command=L"\""+request.executable+L"\"";
+        if(!request.arguments.empty())command+=L" "+request.arguments;
+        STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=(WORD)request.show;
+        PROCESS_INFORMATION child{};
+        if(CreateProcessW(request.executable.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,
+            request.directory.empty()?nullptr:request.directory.c_str(),&startup,&child)) {
+            CloseHandle(child.hThread);if(process)*process=child.hProcess;else CloseHandle(child.hProcess);return ERROR_SUCCESS;
+        }
+        DWORD error=GetLastError();
+        if(error!=ERROR_ELEVATION_REQUIRED)return error; // Shell handles elevation only.
+    }
+    SHELLEXECUTEINFOW info{};info.cbSize=sizeof(info);info.hwnd=owner;
+    info.fMask=SEE_MASK_NOASYNC|SEE_MASK_FLAG_NO_UI|(process?SEE_MASK_NOCLOSEPROCESS:0);
+    info.lpVerb=L"open";info.lpFile=request.file.c_str();info.nShow=request.show;
+    info.lpParameters=request.parameters.empty()?nullptr:request.parameters.c_str();
+    info.lpDirectory=request.directory.empty()?nullptr:request.directory.c_str();
+    if(!ShellExecuteExW(&info)){DWORD error=GetLastError();return error?error:ERROR_GEN_FAILURE;}
+    if(process)*process=info.hProcess;
+    return ERROR_SUCCESS;
 }
 
 } // namespace lib

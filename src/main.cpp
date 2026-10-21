@@ -34,6 +34,7 @@
 #include "library_index.hpp"
 #include "touch_scroll.hpp"
 #include "themes.hpp"
+#include "launch_dispatch.hpp"
 
 using namespace Gdiplus;
 using lib::Item;
@@ -105,6 +106,8 @@ HWND foregroundAtShow = nullptr;
 HWND lastExternalForeground = nullptr;
 focusguard::Guard inputFocus;
 bool restoreOnClose = false, waitingForRelease = false, padNeutral = true, dialogOpen = false;
+HANDLE launchProcess=nullptr;
+lib::Item launchingItem;
 std::vector<RectF> tabRects;
 int htmlTabIndex = -1;
 std::wstring toastMsg;
@@ -1130,7 +1133,21 @@ static void openSelected() {
         ShellExecuteW(nullptr, L"open", lib::configPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return;
     }
-    lib::launch(it);
+    if(G::launchProcess){toast(L"正在启动，请稍候");return;}
+    DWORD error=launchdispatch::start(it,G::launchProcess);
+    G::launchingItem=it;
+    if(!error){toast(L"正在启动 · "+it.title);return;}
+    if(error) {
+        wchar_t* systemMessage=nullptr;
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,error,0,(LPWSTR)&systemMessage,0,nullptr);
+        std::wstring message=L"无法启动："+it.title+L"\n\n"+(systemMessage?std::wstring(systemMessage):L"Windows 未提供错误说明。")+
+            L"\n错误代码："+std::to_wstring(error)+L"\n\n启动项："+it.target;
+        if(systemMessage)LocalFree(systemMessage);
+        G::dialogOpen=true;
+        MessageBoxW(G::hwnd,message.c_str(),L"SideDeck · 启动失败",MB_OK|MB_ICONERROR);
+        G::dialogOpen=false;G::waitForRelease=true;G::dirty=true;return;
+    }
     hidePanel();
 }
 
@@ -1470,6 +1487,9 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     int argumentCount=0;LPWSTR* arguments=CommandLineToArgvW(GetCommandLineW(),&argumentCount);
+    if(arguments && argumentCount>=2 && wcscmp(arguments[1],L"--launch-item")==0) {
+        int result=launchdispatch::run(argumentCount,arguments);LocalFree(arguments);return result;
+    }
     if(arguments && argumentCount==3 && wcscmp(arguments[1],L"--input-watchdog")==0) {
         DWORD parent=(DWORD)wcstoul(arguments[2],nullptr,10);LocalFree(arguments);return isolation::watchdog(parent);
     }
@@ -1655,6 +1675,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (G::trayAdded) Shell_NotifyIconW(NIM_DELETE, &G::nid);
     G::bridge.stop();
     G::inputFocus.release(true);
+    if(G::launchProcess){CloseHandle(G::launchProcess);G::launchProcess=nullptr;}
     KillTimer(G::hwnd, 1);
     UnregisterHotKey(G::hwnd, 1);
     DestroyWindow(G::hwnd);
@@ -1673,6 +1694,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
 // ==================== 手柄轮询 + 动画 ====================
 static void tickAnim(float elapsed = -1) {
+    if(G::launchProcess && WaitForSingleObject(G::launchProcess,0)==WAIT_OBJECT_0) {
+        DWORD result=ERROR_GEN_FAILURE;GetExitCodeProcess(G::launchProcess,&result);
+        CloseHandle(G::launchProcess);G::launchProcess=nullptr;
+        if(result==ERROR_SUCCESS){if(G::visible && !G::closing)hidePanel(false);}
+        else {
+            if(!G::visible || G::closing)showPanel();
+            std::wstring message=L"未能启动："+G::launchingItem.title+L"\n\n";
+            wchar_t* detail=nullptr;
+            FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr,result,0,(LPWSTR)&detail,0,nullptr);
+            message+=detail?detail:L"启动子进程异常退出，可能由 Windows 外壳扩展引起。面板仍可继续使用。";
+            if(detail)LocalFree(detail);
+            message+=L"\n错误代码："+std::to_wstring(result)+L"\n\n启动项："+G::launchingItem.target;
+            G::dialogOpen=true;MessageBoxW(G::hwnd,message.c_str(),L"SideDeck · 启动失败",MB_OK|MB_ICONERROR);
+            G::dialogOpen=false;G::waitForRelease=true;G::dirty=true;
+        }
+    }
     if (!G::visible) return;
     ULONGLONG now = GetTickCount64();
     float dt = elapsed >= 0 ? elapsed : (G::animTick ? std::min(0.05f, (now - G::animTick) / 1000.0f) : 0.016f);

@@ -24,6 +24,23 @@ static void snapshot(const std::wstring& path) {
     savePng(bitmap, path);
 }
 int main() {
+    int probeCount=0;auto probeArgs=CommandLineToArgvW(GetCommandLineW(),&probeCount);
+    if(probeArgs && probeCount>=2 && std::wstring(probeArgs[1])==L"--launch-item") {
+        if(probeCount==4 && std::wstring(probeArgs[3])==L"__fixture_launch_crash__") {
+            TerminateProcess(GetCurrentProcess(),0xC0000005);return 1;
+        }
+        int result=launchdispatch::run(probeCount,probeArgs);LocalFree(probeArgs);return result;
+    }
+    if(probeArgs && probeCount==5 && std::wstring(probeArgs[1])==L"--launch-probe") {
+        wchar_t cwd[32768]{};GetCurrentDirectoryW(32768,cwd);
+        sj::Value output(sj::Type::Object);output["cwd"]=ui::narrow(cwd);
+        output["argument"]=ui::narrow(probeArgs[3]);output["tail"]=ui::narrow(probeArgs[4]);
+        auto temporary=std::wstring(probeArgs[2])+L".tmp";
+        writeText(temporary,sj::dump(output));
+        MoveFileExW(temporary.c_str(),probeArgs[2],MOVEFILE_REPLACE_EXISTING);
+        LocalFree(probeArgs);return 0;
+    }
+    if(probeArgs)LocalFree(probeArgs);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     ULONG_PTR token = 0; GdiplusStartupInput startup;
     assert(GdiplusStartup(&token, &startup, nullptr) == Ok);
@@ -98,6 +115,63 @@ int main() {
         assert(imported.manual.size() == 3 && lib::manualPathKey(imported.manual[0].target) == lib::manualPathKey(second) && lib::manualPathKey(imported.manual[1].target) == lib::manualPathKey(shortcut));
         auto repeated = lib::addManualFiles(imported, {first, second, shortcut});
         assert(repeated.added == 0 && repeated.duplicates == 3 && imported.manual.size() == 3);
+        // Real shell launch of a self-contained probe, never a user's game.
+        auto launchRoot=std::filesystem::path(root)/L"launch-fixtures";
+        auto launchWork=launchRoot/L"游戏 实际起始目录";auto linkFolder=launchRoot/L"桌面快捷方式";
+        std::filesystem::create_directories(launchWork);std::filesystem::create_directories(linkFolder);
+        auto launchLink=linkFolder/L"测试 游戏.LNK";auto report=launchRoot/L"probe.json";
+        wchar_t testExe[32768]{};GetModuleFileNameW(nullptr,testExe,32768);
+        IShellLinkW* shellLink=nullptr;assert(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&shellLink))));
+        assert(SUCCEEDED(shellLink->SetPath(testExe)));
+        auto parameters=L"--launch-probe \""+report.wstring()+L"\" \"中文 参数\" --renderer=vulkan";
+        assert(SUCCEEDED(shellLink->SetArguments(parameters.c_str())));
+        assert(SUCCEEDED(shellLink->SetWorkingDirectory(launchWork.c_str())));
+        assert(SUCCEEDED(shellLink->SetShowCmd(SW_HIDE)));
+        IPersistFile* linkFile=nullptr;assert(SUCCEEDED(shellLink->QueryInterface(IID_PPV_ARGS(&linkFile))));
+        assert(SUCCEEDED(linkFile->Save(launchLink.c_str(),TRUE)));
+        auto waitProbe=[&](HANDLE process){
+            assert(process && WaitForSingleObject(process,10000)==WAIT_OBJECT_0);
+            DWORD code=99;assert(GetExitCodeProcess(process,&code) && code==0);CloseHandle(process);
+            return sj::Parser(lib::readTextFile(report.wstring())).parse();
+        };
+        lib::Item launchItem;launchItem.target=launchLink.wstring();auto request=lib::prepareLaunch(launchItem);
+        assert(request.file==launchLink.wstring() && request.parameters.empty() && request.directory==launchWork.wstring());
+        DeleteFileW(report.c_str());HANDLE launched=nullptr;assert(lib::launch(launchItem,nullptr,&launched)==ERROR_SUCCESS);
+        auto launchedReport=waitProbe(launched);
+        assert(lib::manualPathKey(ui::utf8(launchedReport.getStr("cwd")))==lib::manualPathKey(launchWork.wstring()));
+        assert(launchedReport.getStr("argument")=="中文 参数" && launchedReport.getStr("tail")=="--renderer=vulkan");
+        DeleteFileW(report.c_str());HANDLE dispatch=nullptr;assert(launchdispatch::start(launchItem,dispatch)==ERROR_SUCCESS);
+        assert(WaitForSingleObject(dispatch,10000)==WAIT_OBJECT_0);DWORD dispatchCode=99;
+        assert(GetExitCodeProcess(dispatch,&dispatchCode) && dispatchCode==0);CloseHandle(dispatch);
+        for(int i=0;i<200 && !lib::fileExists(report.wstring());++i)Sleep(10);
+        auto dispatched=sj::Parser(lib::readTextFile(report.wstring())).parse();
+        assert(dispatched.getStr("argument")=="中文 参数" && dispatched.getStr("tail")=="--renderer=vulkan");
+        assert(lib::manualPathKey(ui::utf8(dispatched.getStr("cwd")))==lib::manualPathKey(launchWork.wstring()));
+        lib::Item failedChild;failedChild.target=L"__fixture_launch_crash__";
+        assert(launchdispatch::start(failedChild,dispatch)==ERROR_SUCCESS);
+        assert(WaitForSingleObject(dispatch,10000)==WAIT_OBJECT_0);
+        assert(GetExitCodeProcess(dispatch,&dispatchCode) && dispatchCode==0xC0000005);CloseHandle(dispatch);
+        // The parent remains alive after a child exits with the observed fault code.
+        wchar_t systemDir[MAX_PATH]{};GetSystemDirectoryW(systemDir,MAX_PATH);
+        auto iconResource=std::wstring(systemDir)+L"\\shell32.dll";
+        assert(SUCCEEDED(shellLink->SetIconLocation(iconResource.c_str(),0)));
+        assert(SUCCEEDED(linkFile->Save(launchLink.c_str(),TRUE)));
+        auto shortcutIcon=G::iconCache.get(launchLink.wstring(),48);
+        assert(shortcutIcon && shortcutIcon->GetWidth()==48);
+        for(auto text:{L"",L"trailing\\",L"含空格 text",L"embedded\"quote",L"\\\\\"tail\\"}) {
+            auto cmd=L"probe "+launchdispatch::quote(text);int n=0;auto parsed=CommandLineToArgvW(cmd.c_str(),&n);
+            assert(parsed && n==2 && std::wstring(parsed[1])==text);LocalFree(parsed);
+        }
+        SetEnvironmentVariableW(L"SIDEDECK_TEST_WORK",launchWork.c_str());
+        assert(SUCCEEDED(shellLink->SetWorkingDirectory(L"%SIDEDECK_TEST_WORK%")));assert(SUCCEEDED(linkFile->Save(launchLink.c_str(),TRUE)));
+        assert(lib::prepareLaunch(launchItem).directory==launchWork.wstring());
+        assert(SUCCEEDED(shellLink->SetWorkingDirectory(L"")));assert(SUCCEEDED(linkFile->Save(launchLink.c_str(),TRUE)));
+        assert(lib::prepareLaunch(launchItem).directory==std::filesystem::path(testExe).parent_path().wstring());
+        linkFile->Release();shellLink->Release();SetEnvironmentVariableW(L"SIDEDECK_TEST_WORK",nullptr);
+        lib::Item missingItem;missingItem.target=(launchRoot/L"missing.exe").wstring();
+        assert(lib::launch(missingItem)!=ERROR_SUCCESS);
+        lib::Item directItem;directItem.target=testExe;assert(lib::prepareLaunch(directItem).directory==std::filesystem::path(testExe).parent_path().wstring());
+        lib::Item protocol;protocol.kind=lib::Url;protocol.target=L"steam://rungameid/123";assert(lib::prepareLaunch(protocol).directory.empty());
         auto image = G::imageCache.get(root + L"/landscape.png", 0);
         assert(image && image->GetWidth() == 512 && image->GetHeight() == 288);
         auto thumbnail = G::iconCache.get(root + L"/portrait.png", -48);
@@ -291,5 +365,5 @@ int main() {
         G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();G::themeImage.reset();ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: theme import, validation, image copy, stable selection, paging, theme renders, touch/mouse drag, tap suppression, inertia, scroll limits, reader scroll, controller handoff, favorites, pinyin, asynchronous icons, guides and cleanup");
+    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, guides and cleanup");
 }
