@@ -32,6 +32,7 @@
 #include "focus_guard.hpp"
 #include "input_bridge.hpp"
 #include "library_index.hpp"
+#include "touch_scroll.hpp"
 
 using namespace Gdiplus;
 using lib::Item;
@@ -57,6 +58,11 @@ std::unique_ptr<Bitmap> glassCache;
 int glassWidth=0,glassHeight=0,glassTheme=-1;
 unsigned rowRevision=0;
 bool renderCaching=true;
+touchscroll::Gesture touch;
+bool freeScroll=false;
+UINT touchPointer=0;
+ULONGLONG nativeTouchTick=0;
+bool cancelledMouseTap=false;
 int tabIndex = 0;
 std::vector<int> sel;
 std::vector<float> scroll, scrollTarget;
@@ -88,6 +94,7 @@ int view = 0;               // 0=列表 1=阅读
 std::wstring readerTitle;
 std::wstring readerPath;
 float readerScroll = 0, readerTarget = 0;
+float readerMaxScroll=0;
 bool captureHotkey = false; // 正在录制呼出键
 WORD recordedMask = 0;
 bool recordArmed = false;
@@ -226,6 +233,7 @@ static void toggleFavoritesOnly();
 static void openJumpPicker();
 static void jumpTo(wchar_t letter);
 static void refreshGameView();
+static void cancelTouch(HWND window=nullptr);
 
 // ==================== 绘制 ====================
 // UI 缩放：手持设备/电视串流场景整体放大
@@ -382,7 +390,9 @@ static void drawReader(Graphics& g, float w, float h) {
         y += needed.Height + (m.type == MD_H1 || m.type == MD_H2 ? 12.0f : 6.0f);
     }
     g.Restore(saved);
-    G::readerTarget = std::clamp(G::readerTarget, 0.0f, std::max(0.0f, y + G::readerScroll - clip.GetBottom()));
+    G::readerMaxScroll=std::max(0.0f,y+G::readerScroll-clip.GetBottom());
+    G::readerTarget = std::clamp(G::readerTarget, 0.0f, G::readerMaxScroll);
+    G::readerScroll = std::clamp(G::readerScroll,0.0f,G::readerMaxScroll);
 }
 
 static RectF themeSheetRect() {
@@ -566,10 +576,11 @@ static void drawPanel(Graphics& g) {
         auto saved = g.Save();
         g.SetClip(clip, CombineModeIntersect);
 
-        G::scrollTarget[G::tabIndex] = std::max(0.0f,
+        if(!G::freeScroll)G::scrollTarget[G::tabIndex] = std::max(0.0f,
             (float)G::sel[G::tabIndex] * (ITEM_H + ITEM_GAP) - listH / 2 + ITEM_H / 2);
         float maxScroll = std::max(0.0f, (float)items.size() * (ITEM_H + ITEM_GAP) - listH);
-        G::scrollTarget[G::tabIndex] = std::min(G::scrollTarget[G::tabIndex], maxScroll);
+        G::scrollTarget[G::tabIndex] = std::clamp(G::scrollTarget[G::tabIndex],0.0f,maxScroll);
+        G::scroll[G::tabIndex] = std::clamp(G::scroll[G::tabIndex],0.0f,maxScroll);
 
         float step = ITEM_H + ITEM_GAP;
         float pageOffset = (1 - ui::easeOutCubic(G::pageAnim)) * 16 * S() * G::pageDirection;
@@ -713,6 +724,7 @@ static void computeGeometry() {
 }
 
 static void showPanel() {
+    cancelTouch(G::hwnd);
     G::bridge.block(true);
     if (G::visible) { G::closing = false; G::waitingForRelease = false; G::waitForRelease = true; return; }
     HWND previous = GetForegroundWindow();
@@ -768,6 +780,7 @@ static void showPanel() {
 }
 
 static void hidePanel(bool restoreFocus) {
+    cancelTouch(G::hwnd);
     if (!G::visible) return;
     G::closing = true;
     G::restoreOnClose = restoreFocus && G::inputFocus.ownsForeground();
@@ -780,6 +793,7 @@ static void hidePanel(bool restoreFocus) {
 
 // ==================== 数据 ====================
 static void refreshGameView() {
+    cancelTouch(G::hwnd);G::freeScroll=false;
     if(G::tabs.empty())return;
     std::wstring selected;
     if(!G::sel.empty() && G::sel[0]>=0 && G::sel[0]<(int)G::tabs[0].items.size())selected=libraryindex::identity(G::tabs[0].items[G::sel[0]]);
@@ -794,6 +808,7 @@ static void refreshGameView() {
     G::focusReady=false;G::dirty=true;
 }
 static void rebuildTabs() {
+    cancelTouch(G::hwnd);G::freeScroll=false;
     G::tabs.clear();
     G::htmlTabIndex = -1;
     Tab games; games.name = L"游戏库";
@@ -889,6 +904,7 @@ static void toggleFavoritesOnly() {
     G::favoritesOnly=!G::favoritesOnly;refreshGameView();G::sel[0]=0;G::scroll[0]=G::scrollTarget[0]=0;
 }
 static void snapSelection(int index) {
+    cancelTouch(G::hwnd);G::freeScroll=false;
     auto& items=G::tabs[G::tabIndex].items;if(items.empty())return;
     G::sel[G::tabIndex]=std::clamp(index,0,(int)items.size()-1);
     float height=listBottom()-listTop(),step=ITEM_H+ITEM_GAP;
@@ -896,6 +912,7 @@ static void snapSelection(int index) {
     G::scroll[G::tabIndex]=G::scrollTarget[G::tabIndex]=target;G::focusReady=false;G::dirty=true;
 }
 static void openJumpPicker() {
+    cancelTouch(G::hwnd);
     if(G::view!=0 || G::tabIndex!=0 || G::themePicker)return;
     std::fill(std::begin(G::jumpAvailable),std::end(G::jumpAvailable),false);
     for(auto& item:G::tabs[0].items) {
@@ -991,6 +1008,7 @@ static void configureIsolation() {
 
 // ==================== 动作 ====================
 static void openSelected() {
+    cancelTouch(G::hwnd);
     if(G::jumpPicker){jumpTo(G::jumpLetters[G::jumpIndex]);return;}
     if (G::themePicker) { applyTheme(G::themePick); return; }
     if (G::view == 1) return;
@@ -1041,7 +1059,7 @@ static void openSelected() {
         LOG("md parsed");
         G::readerTitle = it.title;
         G::readerPath = it.target;
-        G::readerScroll = 0; G::readerTarget = 0;
+        G::readerScroll = 0; G::readerTarget = 0;G::readerMaxScroll=0;
         G::view = 1;
         G::pageAnim = 0;
         G::dirty = true;
@@ -1070,6 +1088,7 @@ static void openSelected() {
 }
 
 static void navigate(int delta) {
+    cancelTouch(G::hwnd);
     if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta*6,0,26);G::dirty=true;return;}
     if (G::themePicker) {
         G::themePick = std::clamp(G::themePick + delta, 0, ui::THEME_COUNT - 1);
@@ -1083,6 +1102,13 @@ static void navigate(int delta) {
     auto& items = G::tabs[G::tabIndex].items;
     if (items.empty()) return;
     int n = (int)items.size();
+    if(G::freeScroll) {
+        float step=ITEM_H+ITEM_GAP;
+        int first=std::clamp((int)ceilf(G::scroll[G::tabIndex]/step),0,n-1);
+        int last=std::clamp((int)floorf((G::scroll[G::tabIndex]+listBottom()-listTop()-ITEM_H)/step),first,n-1);
+        if(G::sel[G::tabIndex]<first || G::sel[G::tabIndex]>last)G::sel[G::tabIndex]=delta>=0?first-1:last+1;
+    }
+    G::freeScroll=false;
     int before = G::sel[G::tabIndex];
     G::sel[G::tabIndex] = std::clamp(G::sel[G::tabIndex] + delta, 0, n - 1);
     if(abs(delta)>1)snapSelection(G::sel[G::tabIndex]);
@@ -1095,16 +1121,19 @@ static void navigate(int delta) {
 }
 
 static void switchTab(int delta) {
+    cancelTouch(G::hwnd);
     if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta,0,26);G::dirty=true;return;}
     if (G::view == 1 || G::themePicker) return;
     int n = (int)G::tabs.size();
     if (n <= 1) return;
+    G::freeScroll=false;
     G::tabIndex = (G::tabIndex + delta + n) % n;
     G::pageAnim = 0; G::pageDirection = delta >= 0 ? 1 : -1;
     G::dirty = true;
 }
 
 static void goBack() {
+    cancelTouch(G::hwnd);
     if(G::jumpPicker){G::jumpPicker=false;G::dirty=true;return;}
     if (G::themePicker) { G::themePicker = false; G::dirty = true; }
     else if (G::view == 1) { G::view = 0; G::dirty = true; G::pageAnim = 0; }
@@ -1113,9 +1142,113 @@ static void goBack() {
 }
 
 // ==================== 窗口过程 ====================
+static double touchTime() {return GetTickCount64()/1000.0;}
+static void cancelTouch(HWND window) {
+    if(G::touch.active && G::touchPointer==0)G::cancelledMouseTap=true;
+    G::touch.cancel();G::touchPointer=0;
+    if(window && GetCapture()==window)ReleaseCapture();
+}
+static float listMaximum() {
+    if(G::tabIndex<0 || G::tabIndex>=(int)G::tabs.size())return 0;
+    return std::max(0.0f,(float)G::tabs[G::tabIndex].items.size()*(ITEM_H+ITEM_GAP)-(listBottom()-listTop()));
+}
+static bool scrollPixels(float distance,bool direct) {
+    if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey || G::themePicker || G::jumpPicker)return false;
+    float previous=0,next=0;
+    if(G::view==1) {
+        previous=direct?G::readerScroll:G::readerTarget;
+        next=std::clamp(previous+distance,0.0f,G::readerMaxScroll);G::readerTarget=next;
+        if(direct)G::readerScroll=next;
+    } else {
+        if(G::tabIndex<0 || G::tabIndex>=(int)G::tabs.size())return false;
+        G::freeScroll=true;previous=direct?G::scroll[G::tabIndex]:G::scrollTarget[G::tabIndex];
+        next=std::clamp(previous+distance,0.0f,listMaximum());G::scrollTarget[G::tabIndex]=next;
+        if(direct)G::scroll[G::tabIndex]=next;
+        G::focusReady=false;
+    }
+    if(direct && std::fabs(next-previous-distance)>0.1f)G::touch.velocity=0;
+    if(next!=previous)G::dirty=true;
+    return next!=previous;
+}
+static bool beginTouch(HWND window,float x,float y) {
+    if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey)return false;
+    bool eligible=!G::themePicker && !G::jumpPicker && x>=PADX*0.5f && x<=G::W-PADX*0.5f &&
+        y>=(G::view==1 ? HEADER_H+32*S() : listTop()) && y<listBottom();
+    bool moving=false;
+    if(eligible) {
+        if(G::view==1) {moving=fabsf(G::readerTarget-G::readerScroll)>2;G::readerTarget=G::readerScroll;}
+        else {moving=fabsf(G::scrollTarget[G::tabIndex]-G::scroll[G::tabIndex])>2;G::scrollTarget[G::tabIndex]=G::scroll[G::tabIndex];G::freeScroll=true;}
+    }
+    G::touch.begin(x,y,touchTime(),eligible);G::touch.stopTap=G::touch.stopTap || (eligible&&moving);
+    G::cancelledMouseTap=false;
+    (void)window;return true;
+}
+static void moveTouch(float x,float y) {
+    float distance=G::touch.move(x,y,touchTime(),8*S(),3200*S());
+    if(distance!=0)scrollPixels(distance,true);
+}
+static bool promotedTouchMouse() {
+    DWORD extra=(DWORD)(ULONG_PTR)GetMessageExtraInfo();
+    return (extra&0xffffff00u)==0xff515700u && G::nativeTouchTick && GetTickCount64()-G::nativeTouchTick<1000;
+}
+constexpr UINT WM_SIDEDECK_TAP=WM_APP+72;
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE:
+        case WM_POINTERUP: {
+            UINT id=GET_POINTERID_WPARAM(wp);POINTER_INPUT_TYPE type=PT_POINTER;
+            if(!GetPointerType(id,&type) || (type!=PT_TOUCH && type!=PT_PEN))break;
+            G::nativeTouchTick=GetTickCount64();
+            POINTER_INFO info{};
+            if(!GetPointerInfo(id,&info)) {if(G::touchPointer==id)cancelTouch(h);return 0;}
+            if(info.pointerFlags&POINTER_FLAG_CANCELED) {if(G::touchPointer==id)cancelTouch(h);return 0;}
+            POINT point=info.ptPixelLocation;ScreenToClient(h,&point);
+            if(m==WM_POINTERDOWN) {
+                if(!(info.pointerFlags&POINTER_FLAG_PRIMARY) || G::touch.active)return 0;
+                if(beginTouch(h,(float)point.x,(float)point.y))G::touchPointer=id;
+            } else if(id==G::touchPointer && G::touch.active) {
+                moveTouch((float)point.x,(float)point.y);
+                if(m==WM_POINTERUP) {
+                    bool consumed=G::touch.end(touchTime());G::touchPointer=0;
+                    if(!consumed)WndProc(h,WM_SIDEDECK_TAP,0,MAKELPARAM(point.x,point.y));
+                }
+            }
+            return 0;
+        }
+        case WM_POINTERCAPTURECHANGED:
+            if(G::touchPointer && GET_POINTERID_WPARAM(wp)==G::touchPointer)cancelTouch(h);
+            return 0;
+        case WM_LBUTTONDOWN: {
+            if(promotedTouchMouse())return 0;
+            if(G::touchPointer)return 0;
+            if(beginTouch(h,(float)GET_X_LPARAM(lp),(float)GET_Y_LPARAM(lp)) && h)SetCapture(h);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if(promotedTouchMouse())return 0;
+            if(G::touch.active && G::touchPointer==0) {
+                if(!(wp&MK_LBUTTON)){cancelTouch(h);return 0;}
+                moveTouch((float)GET_X_LPARAM(lp),(float)GET_Y_LPARAM(lp));
+            }
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            if(G::touch.active && G::touchPointer==0)cancelTouch(nullptr);
+            break;
+        case WM_CANCELMODE:
+            cancelTouch(h);break;
         case WM_LBUTTONUP: {
+            if(promotedTouchMouse())return 0;
+            if(G::cancelledMouseTap){G::cancelledMouseTap=false;return 0;}
+            if(G::touchPointer)return 0;
+            bool consumed=false;
+            if(G::touch.active) {moveTouch((float)GET_X_LPARAM(lp),(float)GET_Y_LPARAM(lp));consumed=G::touch.end(touchTime());}
+            if(h && GetCapture()==h)ReleaseCapture();
+            if(consumed)return 0;
+            return WndProc(h,WM_SIDEDECK_TAP,wp,lp);
+        }
+        case WM_SIDEDECK_TAP: {
             int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
             if (G::captureHotkey) break;
             if(G::closing || G::dialogOpen)break;
@@ -1181,17 +1314,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         }
         case WM_MOUSEWHEEL: {
+            if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey)break;
             int d = ((short)HIWORD(wp)) > 0 ? -1 : 1;
-            if (G::view == 1) {
-                G::readerTarget = std::max(0.0f, G::readerTarget + d * 120.0f);
-                G::dirty = true;
-            } else if (G::visible) {
-                navigate(d);
-            }
+            if(G::themePicker || G::jumpPicker){navigate(d);break;}
+            cancelTouch(h);
+            scrollPixels(-(float)(short)HIWORD(wp)/WHEEL_DELTA*72*S(),false);
             break;
         }
         case WM_KEYDOWN: {
             if (G::closing || G::dialogOpen) break;
+            cancelTouch(h);
             if (G::captureHotkey) {
                 if (wp == VK_ESCAPE) { G::captureHotkey = false; G::recordedMask = 0; G::recordArmed = false; G::dirty = true; }
                 break;
@@ -1513,6 +1645,10 @@ static void tickAnim(float elapsed = -1) {
         ui::theme() = ui::mixTheme(G::themeFrom, ui::themePreset(G::cfg.theme), ui::easeOutCubic(G::themeProgress));
         need = true;
     }
+    if(!G::closing) {
+        float distance=G::touch.coast(dt);
+        if(distance!=0 && scrollPixels(distance,true))need=true;
+    }
     float smoothing = 1 - expf(-18 * dt);
     auto follow = [&](float& value, float target) {
         if (fabsf(value - target) > 0.15f) { value += (target - value) * smoothing; need = true; }
@@ -1559,6 +1695,10 @@ static void tickGamepad() {
     }
     if (G::visible && !G::inputFocus.ownsForeground()) {
         hidePanel(false); tickAnim(); return;
+    }
+    if(G::touch.active) {
+        G::prevBtn=G::curBtn=idx<0?0:G::pad.buttons(idx);
+        tickAnim();return;
     }
 
     if (idx < 0) {
@@ -1645,7 +1785,7 @@ static void tickGamepad() {
     }
     if (pressed & Btn::LB) switchTab(-1);
     if (pressed & Btn::RB) switchTab(1);
-    if (G::view == 1 && (pressed & Btn::X)) { G::readerTarget = 0; G::dirty = true; }
+    if (G::view == 1 && (pressed & Btn::X)) { cancelTouch(G::hwnd);G::readerTarget = 0; G::dirty = true; }
     if(G::view==0 && !G::jumpPicker && !G::themePicker) {
         int direction=G::pad.trigger(gp::RT,idx)>100?1:G::pad.trigger(gp::LT,idx)>100?-1:0;
         if(direction && (direction!=G::triggerDirection || now>=G::triggerRepeat)) {
@@ -1687,7 +1827,7 @@ static void tickGamepad() {
     // 右摇杆：阅读视图滚动
     if (G::view == 1) {
         float ry = G::pad.stickY(true, idx);
-        if (fabsf(ry) > 0.12f) { G::readerTarget = std::max(0.0f, G::readerTarget - ry * 22.0f); G::dirty = true; }
+        if (fabsf(ry) > 0.12f) { cancelTouch(G::hwnd);G::readerTarget = std::max(0.0f, G::readerTarget - ry * 22.0f); G::dirty = true; }
     }
 
     G::prevBtn = b;

@@ -190,6 +190,51 @@ int main() {
         {ui::IconCache background; background.enableAsync();assert(background.get(root+L"/landscape.png",48)==nullptr);
          for(int wait=0;wait<200 && background.revision()==0;++wait)Sleep(5);
          assert(background.revision()==1 && background.get(root+L"/landscape.png",48));background.clear();}
+        {touchscroll::Gesture gesture;
+         gesture.begin(100,300,0,true);assert(gesture.move(103,303,0.01,10,3000)==0);assert(!gesture.end(0.02));
+         gesture.begin(100,300,1,true);assert(gesture.move(100,200,1.05,10,3000)==100);assert(gesture.end(1.06));
+         assert(gesture.coast(0.016f)>0);
+         gesture.begin(100,200,1.08,true);assert(gesture.end(1.09)); // tap stops an existing fling
+         gesture.begin(100,200,2,false);assert(gesture.move(100,50,2.05,10,3000)==0);assert(gesture.end(2.06));
+         gesture.begin(100,300,3,true);gesture.move(180,302,3.05,10,3000);assert(gesture.end(3.06)&&gesture.velocity==0);
+         gesture.begin(100,300,4,true);gesture.move(100,200,4.05,10,3000);assert(gesture.end(4.3)&&gesture.velocity==0);
+         touchscroll::Gesture coarse,fine;coarse.velocity=fine.velocity=1200;
+         float distance=coarse.coast(0.1f),sum=0;for(int frame=0;frame<6;++frame)sum+=fine.coast(0.1f/6);
+         assert(fabsf(distance-sum)<0.01f && fabsf(coarse.velocity-fine.velocity)<0.01f);}
+        G::jumpPicker=G::themePicker=false;G::view=0;G::tabIndex=0;G::visible=true;G::closing=false;G::toastT=0;
+        G::tabs[0].items.clear();
+        for(int i=0;i<60;++i) {Item item;item.kind=lib::Guide;item.title=L"触控样例 "+std::to_wstring(i);item.target=root+L"/guides/demo.md";G::tabs[0].items.push_back(item);}
+        cancelTouch();G::cancelledMouseTap=false;G::freeScroll=false;G::sel[0]=0;G::scroll[0]=G::scrollTarget[0]=0;
+        int startY=(int)(listTop()+ITEM_H*3),endY=startY-180;
+        WndProc(nullptr,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(100,startY));Sleep(12);
+        WndProc(nullptr,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(100,endY));
+        WndProc(nullptr,WM_LBUTTONUP,0,MAKELPARAM(100,endY));
+        assert(G::view==0 && G::sel[0]==0 && G::freeScroll && G::scroll[0]>150 && G::touch.velocity>0);
+        float dragged=G::scroll[0];snapshot(root+L"/touch-list.png");
+        assert(G::scrollTarget[0]==dragged); // drawing must not recenter the old selection
+        tickAnim(0.016f);assert(G::scroll[0]>dragged);
+        int firstVisible=(int)ceilf(G::scroll[0]/(ITEM_H+ITEM_GAP));navigate(1);
+        assert(!G::freeScroll && G::sel[0]==firstVisible && G::touch.velocity==0);
+        scrollPixels(1e6f,true);assert(G::scroll[0]==listMaximum() && G::scrollTarget[0]==listMaximum());
+        scrollPixels(-1e6f,true);assert(G::scroll[0]==0);
+        G::sel[0]=0;G::cancelledMouseTap=false;
+        int tapY=(int)(listTop()+ITEM_H/2);
+        WndProc(nullptr,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(100,tapY));
+        WndProc(nullptr,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(102,tapY+2));
+        WndProc(nullptr,WM_LBUTTONUP,0,MAKELPARAM(102,tapY+2));assert(G::view==1); // small jitter remains a tap
+        int backX=(int)PADX+10,backY=(int)HEADER_H;
+        WndProc(nullptr,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(backX,backY));
+        WndProc(nullptr,WM_LBUTTONUP,0,MAKELPARAM(backX,backY));assert(G::view==0);
+        G::sel[0]=0;G::scroll[0]=G::scrollTarget[0]=0;G::cancelledMouseTap=false;
+        WndProc(nullptr,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(100,tapY));
+        WndProc(nullptr,WM_CANCELMODE,0,0);WndProc(nullptr,WM_LBUTTONUP,0,MAKELPARAM(100,tapY));
+        assert(G::view==0 && !G::touch.active); // lost capture cannot become a click
+        WndProc(nullptr,WM_MOUSEWHEEL,MAKEWPARAM(0,-15),0);
+        assert(G::freeScroll && fabsf(G::scrollTarget[0]-9*S())<0.1f);
+        G::view=1;G::readerScroll=G::readerTarget=100;G::readerMaxScroll=500;
+        assert(scrollPixels(150,true) && G::readerScroll==250);
+        scrollPixels(1000,true);assert(G::readerScroll==500);scrollPixels(-1000,true);assert(G::readerScroll==0);
+        cancelTouch();G::view=0;
         writeText(lib::configPath(), R"({"theme":999,"scale":-8,"width":0,"margin":-3})");
         lib::Config bounds; lib::loadConfig(bounds);
         assert(bounds.theme == 3 && bounds.scale == 0.75f && bounds.width == 320 && bounds.margin == 0);
@@ -198,5 +243,5 @@ int main() {
         G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: favorites persistence/filter/removal, pinyin/letter jumps, grid navigation, asynchronous icons, guides, imports, input handoff, themes, transparency and cleanup");
+    puts("PASS: touch/mouse drag, tap suppression, inertia, scroll limits, reader scroll, controller handoff, favorites, pinyin, asynchronous icons, guides and cleanup");
 }
