@@ -309,6 +309,11 @@ int main() {
         assert(scrollPixels(150,true) && G::readerScroll==250);
         scrollPixels(1000,true);assert(G::readerScroll==500);scrollPixels(-1000,true);assert(G::readerScroll==0);
         cancelTouch();G::view=0;
+        {Bitmap source(4,4,PixelFormat32bppPARGB);{Graphics g(&source);g.Clear(Gdiplus::Color(128,100,40,20));}
+         std::unique_ptr<Bitmap> surface;wallpaper::raster(&source,surface,80,120);
+         Gdiplus::Color color;surface->GetPixel(40,60,&color);
+         assert(color.GetA()==128 && abs((int)color.GetR()-100)<=2 && abs((int)color.GetB()-20)<=2);
+         auto pointer=surface.get();wallpaper::raster(&source,surface,80,120);assert(surface.get()==pointer);}
         // Import must be self-contained, reject malformed data and preserve stable selection.
         auto fixtures=std::filesystem::path(root)/(L"theme-fixtures-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(fixtures/L"source");

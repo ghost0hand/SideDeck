@@ -7,6 +7,21 @@
 #include <chrono>
 
 namespace wallpaper {
+inline void raster(Gdiplus::Bitmap* source,std::unique_ptr<Gdiplus::Bitmap>& output,int w,int h){
+    if(!source)return;
+    if(!output || output->GetWidth()!=(UINT)w || output->GetHeight()!=(UINT)h)output=std::make_unique<Gdiplus::Bitmap>(w,h,PixelFormat32bppPARGB);
+    int sw=source->GetWidth(),sh=source->GetHeight();float scale=std::max((float)w/sw,(float)h/sh);
+    Gdiplus::BitmapData src{},dst{};Gdiplus::Rect sr(0,0,sw,sh),dr(0,0,w,h);
+    if(source->LockBits(&sr,Gdiplus::ImageLockModeRead,PixelFormat32bppPARGB,&src)!=Gdiplus::Ok)return;
+    if(output->LockBits(&dr,Gdiplus::ImageLockModeWrite,PixelFormat32bppPARGB,&dst)!=Gdiplus::Ok){source->UnlockBits(&src);return;}
+    std::vector<int> ix(w),fx(w);
+    for(int x=0;x<w;++x){float p=std::clamp((x+0.5f-w*0.5f)/scale+sw*0.5f-0.5f,0.0f,(float)sw-1);ix[x]=(int)p;fx[x]=(int)((p-ix[x])*256);}
+    for(int y=0;y<h;++y){float p=std::clamp((y+0.5f-h*0.5f)/scale+sh*0.5f-0.5f,0.0f,(float)sh-1);int iy=(int)p,fy=(int)((p-iy)*256);
+        auto a=(BYTE*)src.Scan0+(ptrdiff_t)iy*src.Stride;auto b=(BYTE*)src.Scan0+(ptrdiff_t)std::min(iy+1,sh-1)*src.Stride;auto d=(BYTE*)dst.Scan0+(ptrdiff_t)y*dst.Stride;
+        for(int x=0;x<w;++x){int l=ix[x]*4,r=std::min(ix[x]+1,sw-1)*4,f=fx[x];for(int c=0;c<4;++c){int top=a[l+c]*(256-f)+a[r+c]*f,bot=b[l+c]*(256-f)+b[r+c]*f;d[x*4+c]=(BYTE)((top*(256-fy)+bot*fy+32768)>>16);}}
+    }
+    output->UnlockBits(&dst);source->UnlockBits(&src);
+}
 template<class T> struct Com {
     T* p=nullptr;~Com(){if(p)p->Release();}
     T** out(){return &p;}T* operator->(){return p;}
@@ -47,15 +62,18 @@ public:
             failure=hr;if(SUCCEEDED(com))CoUninitialize();
         });
     }
-    bool take(std::unique_ptr<Gdiplus::Bitmap>& frame){
+    bool take(std::unique_ptr<Gdiplus::Bitmap>& frame,float opacity=1.0f){
         UINT w=0,h=0;
         {std::lock_guard<std::mutex> lock(mutex);
          if(shown==revision || pixels.empty())return false;
          display.swap(pixels);w=width;h=height;shown=revision;}
-        if(!frame || frame->GetWidth()!=w || frame->GetHeight()!=h)frame=std::make_unique<Gdiplus::Bitmap>(w,h,PixelFormat32bppRGB);
+        if(!frame || frame->GetWidth()!=w || frame->GetHeight()!=h)frame=std::make_unique<Gdiplus::Bitmap>(w,h,PixelFormat32bppPARGB);
         Gdiplus::BitmapData data;Gdiplus::Rect rect(0,0,w,h);
-        if(frame->LockBits(&rect,Gdiplus::ImageLockModeWrite,PixelFormat32bppRGB,&data)!=Gdiplus::Ok)return false;
-        for(UINT y=0;y<h;++y)memcpy((BYTE*)data.Scan0+(ptrdiff_t)y*data.Stride,display.data()+(size_t)y*w*4,w*4);
+        if(frame->LockBits(&rect,Gdiplus::ImageLockModeWrite,PixelFormat32bppPARGB,&data)!=Gdiplus::Ok)return false;
+        unsigned alpha=(unsigned)(std::clamp(opacity,0.0f,1.0f)*255+0.5f);
+        for(UINT y=0;y<h;++y){auto dst=(BYTE*)data.Scan0+(ptrdiff_t)y*data.Stride;auto src=display.data()+(size_t)y*w*4;
+            for(UINT x=0;x<w;++x){dst[x*4]=(src[x*4]*alpha+127)/255;dst[x*4+1]=(src[x*4+1]*alpha+127)/255;dst[x*4+2]=(src[x*4+2]*alpha+127)/255;dst[x*4+3]=(BYTE)alpha;}}
+
         frame->UnlockBits(&data);return true;
     }
 private:

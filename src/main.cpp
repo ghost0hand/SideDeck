@@ -35,6 +35,7 @@
 #include "touch_scroll.hpp"
 #include "themes.hpp"
 #include "video_wallpaper.hpp"
+#include "frame_clock.hpp"
 #include "launch_dispatch.hpp"
 
 using namespace Gdiplus;
@@ -81,6 +82,7 @@ bool visible = false;
 bool closing = false;
 float anim = 0.0f;          // 0..1
 ULONGLONG animTick = 0;
+double animTime=0;
 float pageAnim = 1, pageDirection = 1;
 float focusY = 0, focusTarget = 0;
 int focusTab = -1;
@@ -89,7 +91,7 @@ float tabPillX = 0, tabPillW = 0, tabPillTargetX = 0, tabPillTargetW = 0;
 bool pillReady = false;
 bool themePicker = false;
 int themePick = 0;
-std::unique_ptr<Bitmap> themeImage,videoFrame;
+std::unique_ptr<Bitmap> themeImage,videoFrame,videoSurface;
 wallpaper::Video video;
 bool videoErrorShown=false;
 ui::Theme themeFrom;
@@ -408,7 +410,7 @@ static std::filesystem::path themeDirectory(){return std::filesystem::path(lib::
 static int currentTheme(){return themes::selected(G::cfg.theme,G::cfg.themeFile);}
 static const themes::Entry& currentThemeEntry(){return themes::get(currentTheme());}
 static void loadThemeImage(){
-    G::video.close();G::videoFrame.reset();G::videoErrorShown=false;
+    G::video.close();G::videoFrame.reset();G::videoSurface.reset();G::videoErrorShown=false;
     G::themeImage.reset();G::rowCache.clear();G::glassCache.reset();
     const auto& entry=currentThemeEntry();
     G::video.open(entry.video.wstring());
@@ -504,7 +506,11 @@ static void drawPanel(Graphics& g) {
         auto image=G::videoFrame?G::videoFrame.get():G::themeImage.get();float iw=(float)image->GetWidth(),ih=(float)image->GetHeight();
         if(G::videoFrame)g.SetInterpolationMode(InterpolationModeBilinear);
         float scale=std::max(w/iw,h/ih);
-        ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
+        if(G::videoFrame){
+            if(!G::videoSurface || G::videoSurface->GetWidth()!=(UINT)G::W || G::videoSurface->GetHeight()!=(UINT)G::H)wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H);
+            ui::drawCachedBitmap(g,G::videoSurface.get(),0,0);
+        }
+        else ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
     }
     {
         LinearGradientBrush br(PointF(0, 0), PointF(0, h),
@@ -772,7 +778,7 @@ static void showPanel() {
     G::waitForRelease = true;
     G::restoreOnClose = false; G::waitingForRelease = false;
     G::anim = 0.0f;
-    G::animTick = GetTickCount64();
+    G::animTick = GetTickCount64();G::animTime=frameclock::seconds();
     G::focusReady = false; G::pillReady = false;
     G::triggerDirection=0;G::triggerRepeat=0;
     // 可选：给游戏发暂停键
@@ -1662,7 +1668,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         AppendMenuW(G::hTrayMenu, MF_STRING, 1006, L"退出");
     }
 
-    SetTimer(G::hwnd, 1, 16, nullptr);
+    HANDLE frameTimer=frameclock::create();
+    if(!frameTimer)SetTimer(G::hwnd,1,10,nullptr);
     LOG("timer ok");
     RegisterHotKey(G::hwnd, 1, MOD_CONTROL | MOD_NOREPEAT, VK_SPACE);   // Ctrl+空格 备用呼出
 
@@ -1675,10 +1682,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     MSG msg{};
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    bool running=true;
+    while(running){
+        DWORD result=MsgWaitForMultipleObjectsEx(frameTimer?1:0,frameTimer?&frameTimer:nullptr,INFINITE,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
+        if(result==WAIT_FAILED)break;
+        if(frameTimer && result==WAIT_OBJECT_0)tickGamepad();
+        // Bound message draining so pointer floods cannot starve animation.
+        for(int n=0;n<64 && PeekMessageW(&msg,nullptr,0,0,PM_REMOVE);++n){
+            if(msg.message==WM_QUIT){running=false;break;}
+            TranslateMessage(&msg);DispatchMessageW(&msg);
+        }
     }
+    if(frameTimer){CancelWaitableTimer(frameTimer);CloseHandle(frameTimer);}
 
     if (G::trayAdded) Shell_NotifyIconW(NIM_DELETE, &G::nid);
     G::bridge.stop();
@@ -1692,7 +1707,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     delete G::backdrop;
     G::backdrop = nullptr;
     G::iconCache.clear(); G::imageCache.clear();
-    G::rowCache.clear();G::glassCache.reset();G::video.close();G::videoFrame.reset();G::themeImage.reset();ui::fontCache.clear();
+    G::rowCache.clear();G::glassCache.reset();G::video.close();G::videoFrame.reset();G::videoSurface.reset();G::themeImage.reset();ui::fontCache.clear();
     releaseDib();
     GdiplusShutdown(token);
     CoUninitialize();
@@ -1721,10 +1736,12 @@ static void tickAnim(float elapsed = -1) {
     }
     G::video.playing(G::visible && !G::closing);
     if (!G::visible) return;
-    if(G::video.take(G::videoFrame)){G::glassDirty=true;G::dirty=true;}
+    if(G::video.take(G::videoFrame,currentThemeEntry().imageOpacity)){wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H);G::glassDirty=true;G::dirty=true;}
     if(FAILED(G::video.error()) && !G::videoErrorShown){G::videoErrorShown=true;toast(L"视频壁纸无法播放，请检查文件或系统媒体组件");}
     ULONGLONG now = GetTickCount64();
-    float dt = elapsed >= 0 ? elapsed : (G::animTick ? std::min(0.05f, (now - G::animTick) / 1000.0f) : 0.016f);
+    double precise=frameclock::seconds();
+    float dt=elapsed>=0?elapsed:(G::animTime?std::min(0.05f,(float)(precise-G::animTime)):0.016f);
+    G::animTime=precise;
     G::animTick = now;
     bool need = false;
     if (G::closing) {
