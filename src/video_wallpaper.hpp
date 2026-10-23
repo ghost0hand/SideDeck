@@ -7,10 +7,13 @@
 #include <chrono>
 
 namespace wallpaper {
-inline void raster(Gdiplus::Bitmap* source,std::unique_ptr<Gdiplus::Bitmap>& output,int w,int h){
+inline void raster(Gdiplus::Bitmap* source,std::unique_ptr<Gdiplus::Bitmap>& output,int w,int h,const std::string& fit="auto"){
     if(!source)return;
     if(!output || output->GetWidth()!=(UINT)w || output->GetHeight()!=(UINT)h)output=std::make_unique<Gdiplus::Bitmap>(w,h,PixelFormat32bppPARGB);
-    int sw=source->GetWidth(),sh=source->GetHeight();float scale=std::max((float)w/sw,(float)h/sh);
+    int sw=source->GetWidth(),sh=source->GetHeight();float cover=std::max((float)w/sw,(float)h/sh),contain=std::min((float)w/sw,(float)h/sh);
+    bool full=fit=="contain" || (fit=="auto" && cover/contain>1.02f);
+    // Clamping outside the contained frame extends edge colors into the gaps.
+    float scale=full?contain:cover;
     Gdiplus::BitmapData src{},dst{};Gdiplus::Rect sr(0,0,sw,sh),dr(0,0,w,h);
     if(source->LockBits(&sr,Gdiplus::ImageLockModeRead,PixelFormat32bppPARGB,&src)!=Gdiplus::Ok)return;
     if(output->LockBits(&dr,Gdiplus::ImageLockModeWrite,PixelFormat32bppPARGB,&dst)!=Gdiplus::Ok){source->UnlockBits(&src);return;}

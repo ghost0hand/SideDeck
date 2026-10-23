@@ -507,7 +507,7 @@ static void drawPanel(Graphics& g) {
         if(G::videoFrame)g.SetInterpolationMode(InterpolationModeBilinear);
         float scale=std::max(w/iw,h/ih);
         if(G::videoFrame){
-            if(!G::videoSurface || G::videoSurface->GetWidth()!=(UINT)G::W || G::videoSurface->GetHeight()!=(UINT)G::H)wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H);
+            if(!G::videoSurface || G::videoSurface->GetWidth()!=(UINT)G::W || G::videoSurface->GetHeight()!=(UINT)G::H)wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H,currentThemeEntry().videoFit);
             ui::drawCachedBitmap(g,G::videoSurface.get(),0,0);
         }
         else ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
@@ -1736,7 +1736,7 @@ static void tickAnim(float elapsed = -1) {
     }
     G::video.playing(G::visible && !G::closing);
     if (!G::visible) return;
-    if(G::video.take(G::videoFrame,currentThemeEntry().imageOpacity)){wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H);G::glassDirty=true;G::dirty=true;}
+    if(G::video.take(G::videoFrame,currentThemeEntry().imageOpacity)){wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H,currentThemeEntry().videoFit);G::glassDirty=true;G::dirty=true;}
     if(FAILED(G::video.error()) && !G::videoErrorShown){G::videoErrorShown=true;toast(L"视频壁纸无法播放，请检查文件或系统媒体组件");}
     ULONGLONG now = GetTickCount64();
     double precise=frameclock::seconds();

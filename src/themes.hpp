@@ -13,6 +13,7 @@ struct Entry {
     ui::Theme palette;
     int base=0;
     float imageOpacity=0.75f;
+    std::string videoFit="auto";
 };
 inline std::vector<Entry> entries=[] {
     std::vector<Entry> result;
@@ -81,6 +82,10 @@ inline bool load(const fs::path& path, Entry& result) {
             // Check dimensions before loading the full bitmap into the active theme.
             Gdiplus::Bitmap probe(e.image.c_str());
             if(probe.GetLastStatus()!=Gdiplus::Ok || !probe.GetWidth() || !probe.GetHeight() || probe.GetWidth()>4096 || probe.GetHeight()>4096)return false;
+        }
+        if(auto fit=root.find("videoFit")) {
+            if(!fit->isStr() || (fit->str!="auto" && fit->str!="contain" && fit->str!="cover"))return false;
+            e.videoFit=fit->str;
         }
         auto video=ui::utf8(root.getStr("video"));
         if(!video.empty()) {

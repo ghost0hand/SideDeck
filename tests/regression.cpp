@@ -314,6 +314,15 @@ int main() {
          Gdiplus::Color color;surface->GetPixel(40,60,&color);
          assert(color.GetA()==128 && abs((int)color.GetR()-100)<=2 && abs((int)color.GetB()-20)<=2);
          auto pointer=surface.get();wallpaper::raster(&source,surface,80,120);assert(surface.get()==pointer);}
+        {std::unique_ptr<Bitmap> output;
+         for(bool tall:{true,false}){Bitmap source(tall?10:100,tall?100:10,PixelFormat32bppPARGB);
+           {Graphics g(&source);g.Clear(Gdiplus::Color(255,0,180,0));SolidBrush red(Gdiplus::Color(255,255,0,0)),blue(Gdiplus::Color(255,0,0,255));
+            g.FillRectangle(&red,0,0,tall?10:10,tall?10:10);g.FillRectangle(&blue,tall?0:90,tall?90:0,10,10);}
+           wallpaper::raster(&source,output,100,100);Gdiplus::Color first,last;
+           output->GetPixel(tall?50:0,tall?0:50,&first);output->GetPixel(tall?50:99,tall?99:50,&last);
+           assert(first.GetR()>240 && last.GetB()>240);
+           wallpaper::raster(&source,output,100,100,"cover");output->GetPixel(50,50,&first);assert(first.GetG()>170);
+         }}
         // Import must be self-contained, reject malformed data and preserve stable selection.
         auto fixtures=std::filesystem::path(root)/(L"theme-fixtures-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(fixtures/L"source");
@@ -341,6 +350,7 @@ int main() {
         WndProc(nullptr,WM_SIDEDECK_TAP,0,MAKELPARAM((int)(sheet.GetRight()-24*S()),(int)(sheet.GetBottom()-20*S())));
         assert(G::themePick==4);goBack();
         for(auto bad:{
+            R"({"format":"sidedeck-theme","version":1,"name":"Bad","videoFit":"stretch"})",
             R"({"format":"sidedeck-theme","version":1,"name":"Bad","background":"../secret.png"})",
             R"({"format":"sidedeck-theme","version":1,"name":"Bad","imageOpacity":2})",
             R"({"format":"sidedeck-theme","version":1,"name":"Bad","base":0.5})",
