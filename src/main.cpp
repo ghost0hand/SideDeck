@@ -61,6 +61,7 @@ std::unique_ptr<Bitmap> glassCache;
 int glassWidth=0,glassHeight=0,glassTheme=-1;
 unsigned rowRevision=0;
 bool renderCaching=true;
+bool glassDirty=false;
 touchscroll::Gesture touch;
 bool freeScroll=false;
 UINT touchPointer=0;
@@ -501,6 +502,7 @@ static void drawPanel(Graphics& g) {
     if(G::themeImage || G::videoFrame) {
         // Cover crop with preserved aspect ratio; cached together with the glass.
         auto image=G::videoFrame?G::videoFrame.get():G::themeImage.get();float iw=(float)image->GetWidth(),ih=(float)image->GetHeight();
+        if(G::videoFrame)g.SetInterpolationMode(InterpolationModeBilinear);
         float scale=std::max(w/iw,h/ih);
         ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
     }
@@ -518,8 +520,9 @@ static void drawPanel(Graphics& g) {
     };
     if(!G::renderCaching || G::themeProgress<1) {G::glassCache.reset();paintGlass(g);}
     else {
-        if(!G::glassCache || G::glassWidth!=G::W || G::glassHeight!=G::H || G::glassTheme!=G::cfg.theme) {
-            G::glassCache=std::make_unique<Bitmap>(G::W,G::H,PixelFormat32bppPARGB);
+        if(!G::glassCache || G::glassWidth!=G::W || G::glassHeight!=G::H || G::glassTheme!=G::cfg.theme || G::glassDirty) {
+            if(!G::glassCache || G::glassWidth!=G::W || G::glassHeight!=G::H)G::glassCache=std::make_unique<Bitmap>(G::W,G::H,PixelFormat32bppPARGB);
+            G::glassDirty=false;
             Graphics background(G::glassCache.get());background.Clear(Gdiplus::Color(0,0,0,0));background.SetSmoothingMode(SmoothingModeHighQuality);paintGlass(background);
             G::glassWidth=G::W;G::glassHeight=G::H;G::glassTheme=G::cfg.theme;
         }
@@ -1718,7 +1721,7 @@ static void tickAnim(float elapsed = -1) {
     }
     G::video.playing(G::visible && !G::closing);
     if (!G::visible) return;
-    if(G::video.take(G::videoFrame)){G::glassCache.reset();G::dirty=true;}
+    if(G::video.take(G::videoFrame)){G::glassDirty=true;G::dirty=true;}
     if(FAILED(G::video.error()) && !G::videoErrorShown){G::videoErrorShown=true;toast(L"视频壁纸无法播放，请检查文件或系统媒体组件");}
     ULONGLONG now = GetTickCount64();
     float dt = elapsed >= 0 ? elapsed : (G::animTick ? std::min(0.05f, (now - G::animTick) / 1000.0f) : 0.016f);
@@ -1739,6 +1742,7 @@ static void tickAnim(float elapsed = -1) {
             G::restoreOnClose = false;
             G::visible = false; G::closing = false;
             ShowWindow(G::hwnd, SW_HIDE);
+            G::glassCache.reset();G::rowCache.clear();G::imageCache.clear();
             delete G::backdrop; G::backdrop = nullptr;
             return;
         }

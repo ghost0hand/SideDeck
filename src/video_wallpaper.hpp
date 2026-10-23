@@ -18,33 +18,45 @@ class Video {
     UINT width=0,height=0;unsigned revision=0,shown=0;
     std::atomic<HRESULT> failure{S_OK};
     std::atomic<unsigned> repeats{0};
+    std::atomic<bool> resident{false};
+    std::vector<BYTE> display;
 public:
     ~Video(){close();}
     void close(){
         {std::lock_guard<std::mutex> lock(mutex);stopping=true;}wake.notify_all();
         if(worker.joinable())worker.join();
-        pixels.clear();width=height=0;revision=shown=0;
+        std::vector<BYTE>().swap(pixels);std::vector<BYTE>().swap(display);width=height=0;revision=shown=0;
     }
     void playing(bool value){{std::lock_guard<std::mutex> lock(mutex);active=value;}wake.notify_all();}
     HRESULT error()const{return failure.load();}
+    bool loaded()const{return resident.load();}
     unsigned loops()const{return repeats.load();}
     void open(const std::wstring& path){
         close();stopping=false;active=false;failure=S_OK;repeats=0;
         if(path.empty())return;
         worker=std::thread([this,path]{
             HRESULT com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
-            HRESULT hr=MFStartup(MF_VERSION);
-            if(SUCCEEDED(hr)) {
-                hr=decode(path);MFShutdown();
+            HRESULT hr=S_OK;
+            for(;;) {
+                {std::unique_lock<std::mutex> lock(mutex);wake.wait(lock,[&]{return stopping||active;});if(stopping)break;}
+                hr=MFStartup(MF_VERSION);
+                if(SUCCEEDED(hr)) {resident=true;hr=decode(path);resident=false;MFShutdown();}
+                {std::lock_guard<std::mutex> lock(mutex);std::vector<BYTE>().swap(pixels);}
+                if(FAILED(hr))break;
             }
             failure=hr;if(SUCCEEDED(com))CoUninitialize();
         });
     }
     bool take(std::unique_ptr<Gdiplus::Bitmap>& frame){
-        std::lock_guard<std::mutex> lock(mutex);
-        if(shown==revision || pixels.empty())return false;
-        Gdiplus::Bitmap source(width,height,width*4,PixelFormat32bppRGB,pixels.data());
-        frame.reset(source.Clone(0,0,width,height,PixelFormat32bppPARGB));shown=revision;return true;
+        UINT w=0,h=0;
+        {std::lock_guard<std::mutex> lock(mutex);
+         if(shown==revision || pixels.empty())return false;
+         display.swap(pixels);w=width;h=height;shown=revision;}
+        if(!frame || frame->GetWidth()!=w || frame->GetHeight()!=h)frame=std::make_unique<Gdiplus::Bitmap>(w,h,PixelFormat32bppRGB);
+        Gdiplus::BitmapData data;Gdiplus::Rect rect(0,0,w,h);
+        if(frame->LockBits(&rect,Gdiplus::ImageLockModeWrite,PixelFormat32bppRGB,&data)!=Gdiplus::Ok)return false;
+        for(UINT y=0;y<h;++y)memcpy((BYTE*)data.Scan0+(ptrdiff_t)y*data.Stride,display.data()+(size_t)y*w*4,w*4);
+        frame->UnlockBits(&data);return true;
     }
 private:
     HRESULT decode(const std::wstring& path){
@@ -67,9 +79,12 @@ private:
         Com<IMFMediaType> actual;hr=reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,actual.out());if(FAILED(hr))return hr;
         MFGetAttributeSize(actual.p,MF_MT_FRAME_SIZE,&w,&h);if(!w || !h || w>1920 || h>1920)return E_INVALIDARG;
         UINT strideValue=w*4;actual->GetUINT32(MF_MT_DEFAULT_STRIDE,&strideValue);LONG stride=(LONG)strideValue;
-        LONGLONG previous=-1;
+        LONGLONG previous=-1;std::vector<BYTE> next((size_t)w*h*4);
+        auto due=std::chrono::steady_clock::now();
         for(;;){
-            {std::unique_lock<std::mutex> lock(mutex);wake.wait(lock,[&]{return stopping||active;});if(stopping)return S_OK;}
+            {std::unique_lock<std::mutex> lock(mutex);
+             if(!active){if(!wake.wait_for(lock,std::chrono::seconds(2),[&]{return stopping||active;}))return S_FALSE;due=std::chrono::steady_clock::now();}
+             if(stopping)return S_OK;}
             DWORD flags=0;LONGLONG stamp=0;Com<IMFSample> sample;
             hr=reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM,0,nullptr,&flags,&stamp,sample.out());if(FAILED(hr))return hr;
             if(flags&MF_SOURCE_READERF_ENDOFSTREAM){PROPVARIANT start{};start.vt=VT_I8;start.hVal.QuadPart=0;
@@ -77,14 +92,16 @@ private:
             if(!sample.p)continue;
             Com<IMFMediaBuffer> buffer;hr=sample->ConvertToContiguousBuffer(buffer.out());if(FAILED(hr))return hr;
             BYTE* data=nullptr;DWORD length=0;hr=buffer->Lock(&data,nullptr,&length);if(FAILED(hr))return hr;
-            std::vector<BYTE> next((size_t)w*h*4);
+            next.resize((size_t)w*h*4);
             if((size_t)std::abs(stride)*h>length){buffer->Unlock();return E_FAIL;}
             for(UINT y=0;y<h;++y)memcpy(next.data()+(size_t)y*w*4,data+(size_t)(stride<0?h-1-y:y)*std::abs(stride),w*4);
             buffer->Unlock();
             int delay=previous<0?0:(int)std::clamp<LONGLONG>((stamp-previous)/10000,1,100);previous=stamp;
             {std::unique_lock<std::mutex> lock(mutex);
-             if(wake.wait_for(lock,std::chrono::milliseconds(delay),[&]{return stopping||!active;})){if(stopping)return S_OK;continue;}
-             pixels=std::move(next);width=w;height=h;++revision;}
+             due+=std::chrono::milliseconds(delay);
+             if(due<std::chrono::steady_clock::now()-std::chrono::milliseconds(100))due=std::chrono::steady_clock::now();
+             if(wake.wait_until(lock,due,[&]{return stopping||!active;})){if(stopping)return S_OK;continue;}
+             pixels.swap(next);width=w;height=h;++revision;}
         }
     }
 };
