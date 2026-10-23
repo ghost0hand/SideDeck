@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Release', 'Debug', 'Test', 'FocusTest', 'InputTest', 'PerfTest')][string]$Configuration = 'Release',
+    [ValidateSet('Release', 'Debug', 'Test', 'FocusTest', 'InputTest', 'PerfTest', 'VideoTest')][string]$Configuration = 'Release',
     [string]$Compiler = $env:SIDEDECK_CXX
 )
 $ErrorActionPreference = 'Stop'
@@ -23,14 +23,14 @@ $previousPath = $env:PATH
 $env:PATH = "$binDir;$previousPath"
 try {
 $generated = Join-Path $projectRoot 'build/generated'
-$relativeOutput = if ($Configuration -in @('Test', 'FocusTest', 'InputTest', 'PerfTest')) { 'build/tests' } else { "build/$($Configuration.ToLowerInvariant())" }
+$relativeOutput = if ($Configuration -in @('Test', 'FocusTest', 'InputTest', 'PerfTest', 'VideoTest')) { 'build/tests' } else { "build/$($Configuration.ToLowerInvariant())" }
 $outputDir = Join-Path $projectRoot $relativeOutput
 New-Item -ItemType Directory -Path $generated,$outputDir -Force | Out-Null
 $versionHeader = "#pragma once`n#define SIDEDECK_VERSION `"$version`"`n#define SIDEDECK_VERSION_W L`"$version`"`n#define SIDEDECK_VERSION_PARTS $versionParts`n"
 [IO.File]::WriteAllText((Join-Path $generated 'sidedeck_version.hpp'), $versionHeader, [Text.UTF8Encoding]::new($false))
 $arguments = @('-std=c++17', '-D_WIN32_WINNT=0x0A00', '-DUNICODE', '-D_UNICODE', '-static', '-static-libgcc', '-static-libstdc++', '-I', $generated)
-if ($Configuration -in @('Test', 'FocusTest', 'InputTest', 'PerfTest')) {
-    $testName = if ($Configuration -eq 'FocusTest') { 'focus_integration' } elseif ($Configuration -eq 'InputTest') { 'input_driver_check' } elseif ($Configuration -eq 'PerfTest') { 'render_benchmark' } else { 'regression' }
+if ($Configuration -in @('Test', 'FocusTest', 'InputTest', 'PerfTest', 'VideoTest')) {
+    $testName = if ($Configuration -eq 'FocusTest') { 'focus_integration' } elseif ($Configuration -eq 'InputTest') { 'input_driver_check' } elseif ($Configuration -eq 'PerfTest') { 'render_benchmark' } elseif ($Configuration -eq 'VideoTest') { 'video_wallpaper' } else { 'regression' }
     $optimization=if($Configuration -eq 'PerfTest'){'-O2'}else{'-O0'}
     $arguments += @($optimization, '-g', '-o', (Join-Path $outputDir "$testName.exe"), (Join-Path $projectRoot "tests/$testName.cpp"))
 } else {
@@ -42,7 +42,7 @@ if ($Configuration -in @('Test', 'FocusTest', 'InputTest', 'PerfTest')) {
     $arguments += @('-o', (Join-Path $outputDir 'SideDeck.exe'), (Join-Path $projectRoot 'src/main.cpp'), $resource)
 }
 $arguments += @('-lgdiplus', '-lshell32', '-lshlwapi', '-luser32', '-lgdi32', '-lole32', '-loleaut32', '-luuid', '-ladvapi32', '-lcomctl32', '-lcomdlg32', '-lwinmm', '-ldbghelp')
-$arguments += @('-lsetupapi', '-lcfgmgr32')
+$arguments += @('-lsetupapi', '-lcfgmgr32', '-lmfplat', '-lmfreadwrite', '-lmfuuid')
 & $Compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw "$Configuration compilation failed." }
 if ($Configuration -in @('Release', 'Debug')) {

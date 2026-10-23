@@ -34,6 +34,7 @@
 #include "library_index.hpp"
 #include "touch_scroll.hpp"
 #include "themes.hpp"
+#include "video_wallpaper.hpp"
 #include "launch_dispatch.hpp"
 
 using namespace Gdiplus;
@@ -87,7 +88,9 @@ float tabPillX = 0, tabPillW = 0, tabPillTargetX = 0, tabPillTargetW = 0;
 bool pillReady = false;
 bool themePicker = false;
 int themePick = 0;
-std::unique_ptr<Bitmap> themeImage;
+std::unique_ptr<Bitmap> themeImage,videoFrame;
+wallpaper::Video video;
+bool videoErrorShown=false;
 ui::Theme themeFrom;
 float themeProgress = 1;
 bool animating = false;
@@ -404,8 +407,10 @@ static std::filesystem::path themeDirectory(){return std::filesystem::path(lib::
 static int currentTheme(){return themes::selected(G::cfg.theme,G::cfg.themeFile);}
 static const themes::Entry& currentThemeEntry(){return themes::get(currentTheme());}
 static void loadThemeImage(){
+    G::video.close();G::videoFrame.reset();G::videoErrorShown=false;
     G::themeImage.reset();G::rowCache.clear();G::glassCache.reset();
     const auto& entry=currentThemeEntry();
+    G::video.open(entry.video.wstring());
     if(!entry.image.empty()){
         auto image=std::make_unique<Bitmap>(entry.image.c_str());
         if(image->GetLastStatus()==Ok)G::themeImage=std::move(image);
@@ -493,9 +498,9 @@ static void drawPanel(Graphics& g) {
     if (G::backdrop) {
         ui::drawImageOpacity(g, G::backdrop, 0, 0, w, h, T.backdropOpacity);
     }
-    if(G::themeImage) {
+    if(G::themeImage || G::videoFrame) {
         // Cover crop with preserved aspect ratio; cached together with the glass.
-        auto image=G::themeImage.get();float iw=(float)image->GetWidth(),ih=(float)image->GetHeight();
+        auto image=G::videoFrame?G::videoFrame.get():G::themeImage.get();float iw=(float)image->GetWidth(),ih=(float)image->GetHeight();
         float scale=std::max(w/iw,h/ih);
         ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
     }
@@ -894,7 +899,7 @@ static void rebuildTabs() {
     tools.items.push_back(gd);
     Item cf; cf.title = L"编辑配置文件"; cf.subtitle = lib::configPath(); cf.target = L"__editconfig__"; cf.kind = lib::Command;
     tools.items.push_back(cf);
-    Item ti;ti.title=L"导入主题包";ti.subtitle=L"选择 theme.json · 配色和背景一并导入";ti.target=L"__importtheme__";ti.kind=lib::Command;tools.items.push_back(ti);
+    Item ti;ti.title=L"导入主题包";ti.subtitle=L"选择 JSON 或 MP4 · 配色和背景一并导入";ti.target=L"__importtheme__";ti.kind=lib::Command;tools.items.push_back(ti);
     Item td;td.title=L"打开主题目录";td.subtitle=L"放入主题包后，重新打开外观主题即可刷新";td.target=L"__themedir__";td.kind=lib::Command;tools.items.push_back(td);
     G::tabs.push_back(tools);
 
@@ -1383,7 +1388,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             DragFinish(hd);
             std::vector<std::wstring> themePaths,gamePaths;
-            for(auto& path:paths){auto ext=lib::toLowerCp(std::filesystem::path(path).extension().wstring());(ext==L".json"?themePaths:gamePaths).push_back(path);}
+            for(auto& path:paths){auto ext=lib::toLowerCp(std::filesystem::path(path).extension().wstring());((ext==L".json" || ext==L".mp4")?themePaths:gamePaths).push_back(path);}
             if(!gamePaths.empty())addGames(gamePaths);
             if(!themePaths.empty())importThemes(themePaths);
             break;
@@ -1684,7 +1689,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     delete G::backdrop;
     G::backdrop = nullptr;
     G::iconCache.clear(); G::imageCache.clear();
-    G::rowCache.clear();G::glassCache.reset();G::themeImage.reset();ui::fontCache.clear();
+    G::rowCache.clear();G::glassCache.reset();G::video.close();G::videoFrame.reset();G::themeImage.reset();ui::fontCache.clear();
     releaseDib();
     GdiplusShutdown(token);
     CoUninitialize();
@@ -1711,7 +1716,10 @@ static void tickAnim(float elapsed = -1) {
             G::dialogOpen=false;G::waitForRelease=true;G::dirty=true;
         }
     }
+    G::video.playing(G::visible && !G::closing);
     if (!G::visible) return;
+    if(G::video.take(G::videoFrame)){G::glassCache.reset();G::dirty=true;}
+    if(FAILED(G::video.error()) && !G::videoErrorShown){G::videoErrorShown=true;toast(L"视频壁纸无法播放，请检查文件或系统媒体组件");}
     ULONGLONG now = GetTickCount64();
     float dt = elapsed >= 0 ? elapsed : (G::animTick ? std::min(0.05f, (now - G::animTick) / 1000.0f) : 0.016f);
     G::animTick = now;

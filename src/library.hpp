@@ -176,10 +176,10 @@ inline HRESULT chooseGameFiles(HWND owner, std::vector<std::wstring>& paths, boo
     DWORD options = 0;
     result = dialog->GetOptions(&options);
     if (SUCCEEDED(result)) result = dialog->SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
-    const COMDLG_FILTERSPEC themeFilter[] = {{L"SideDeck 主题包", L"*.json"}};
+    const COMDLG_FILTERSPEC themeFilter[] = {{L"主题包 / 动态壁纸", L"*.json;*.mp4"}};
     const COMDLG_FILTERSPEC filters[] = {{L"游戏与快捷方式", L"*.exe;*.lnk;*.url"}, {L"可执行文件", L"*.exe"}, {L"快捷方式", L"*.lnk;*.url"}};
     if (SUCCEEDED(result)) result = dialog->SetFileTypes(themeFiles ? 1 : 3, themeFiles ? themeFilter : filters);
-    if (SUCCEEDED(result)) result = dialog->SetTitle(themeFiles ? L"导入主题 · 选择包内的 theme.json（可多选）" : L"批量添加游戏 · Ctrl / Shift 多选");
+    if (SUCCEEDED(result)) result = dialog->SetTitle(themeFiles ? L"导入主题 · 选择 JSON 或 MP4（可多选）" : L"批量添加游戏 · Ctrl / Shift 多选");
     if (SUCCEEDED(result)) result = dialog->Show(owner);
     IShellItemArray* selection = nullptr;
     if (SUCCEEDED(result)) result = dialog->GetResults(&selection);

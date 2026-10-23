@@ -346,6 +346,12 @@ int main() {
         }
         writeText(source.wstring(),std::string(33000,' '));assert(!themes::load(source,entry));
         std::string deep(100,'[');deep+=std::string(100,']');writeText(source.wstring(),deep);assert(!themes::load(source,entry));
+        auto fakeVideo=fixtures/L"sample.mp4";writeText(fakeVideo.wstring(),"synthetic video metadata fixture");
+        std::wstring videoKey;assert(themes::import(fakeVideo,imports,videoKey));
+        assert(themes::load(imports/videoKey,entry) && entry.video.filename()==L"wallpaper.mp4");
+        assert(lib::readTextFile(entry.video.wstring())=="synthetic video metadata fixture");
+        writeText(source.wstring(),R"({"format":"sidedeck-theme","version":1,"name":"Bad video","video":"../sample.mp4"})");
+        assert(!themes::load(source,entry));
         // Render every shipping theme with synthetic content, no personal library.
         themes::reload(std::filesystem::path(root)/L".."/L".."/L"theme-packs");assert(themes::count()==9);
         G::view=0;G::tabIndex=2;G::scroll[2]=G::scrollTarget[2]=0;G::sel[2]=0;G::cfg.scale=1;ui::g_textScale=1;

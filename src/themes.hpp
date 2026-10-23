@@ -9,7 +9,7 @@ namespace themes {
 namespace fs = std::filesystem;
 struct Entry {
     std::wstring key, name, description;
-    fs::path image;
+    fs::path image,video;
     ui::Theme palette;
     int base=0;
     float imageOpacity=0.75f;
@@ -82,6 +82,12 @@ inline bool load(const fs::path& path, Entry& result) {
             Gdiplus::Bitmap probe(e.image.c_str());
             if(probe.GetLastStatus()!=Gdiplus::Ok || !probe.GetWidth() || !probe.GetHeight() || probe.GetWidth()>4096 || probe.GetHeight()>4096)return false;
         }
+        auto video=ui::utf8(root.getStr("video"));
+        if(!video.empty()) {
+            if(!safeLeaf(video) || fs::path(video).extension()!=L".mp4")return false;
+            e.video=path.parent_path()/video;
+            if(!fs::is_regular_file(e.video) || fs::file_size(e.video)>256*1024*1024)return false;
+        }
         result=std::move(e);return true;
     } catch(...) {return false;}
 }
@@ -106,7 +112,26 @@ inline int selected(int base,const std::wstring& key) {
     for(int i=ui::THEME_COUNT;i<count();++i)if(entries[i].key==key)return i;
     return std::clamp(base,0,ui::THEME_COUNT-1);
 }
+inline bool importVideo(const fs::path& source,const fs::path& directory,std::wstring& key) {
+    try {
+        if(!fs::is_regular_file(source) || fs::file_size(source)>256*1024*1024)return false;
+        std::error_code ec;fs::create_directories(directory,ec);if(ec)return false;
+        fs::path dest;
+        for(int i=1;i<=1000;++i){dest=directory/(L"video-"+std::to_wstring(i));if(fs::create_directory(dest,ec))break;if(ec)return false;dest.clear();}
+        if(dest.empty())return false;
+        fs::copy_file(source,dest/L"wallpaper.mp4",fs::copy_options::none,ec);
+        if(ec){fs::remove(dest,ec);return false;}
+        sj::Value value(sj::Type::Object);value["format"]="sidedeck-theme";value["version"]=1;
+        value["name"]=ui::narrow(source.stem().wstring().substr(0,48));value["description"]="MP4 动态玻璃";
+        value["base"]=0;value["video"]="wallpaper.mp4";value["imageOpacity"]=0.88;
+        std::ofstream file(dest/L"theme.json",std::ios::binary);file<<sj::dump(value);file.close();
+        if(!file){fs::remove(dest/L"theme.json",ec);fs::remove(dest/L"wallpaper.mp4",ec);fs::remove(dest,ec);return false;}
+        key=(dest/L"theme.json").lexically_relative(directory).generic_wstring();return true;
+    }catch(...){return false;}
+}
 inline bool import(const fs::path& source,const fs::path& directory,std::wstring& key) {
+    auto extension=source.extension().wstring();std::transform(extension.begin(),extension.end(),extension.begin(),::towlower);
+    if(extension==L".mp4")return importVideo(source,directory,key);
     Entry e;if(!load(source,e))return false;
     std::error_code ec;fs::create_directories(directory,ec);if(ec)return false;
     auto stem=source.stem().wstring();if(!safeLeaf(stem))stem=L"custom";
@@ -116,8 +141,9 @@ inline bool import(const fs::path& source,const fs::path& directory,std::wstring
     auto jsonDest=dest/L"theme.json";
     // Reserve theme.json for metadata, so image copying cannot overwrite it.
     if(!e.image.empty())fs::copy_file(e.image,dest/e.image.filename(),fs::copy_options::none,ec);
+    if(!ec && !e.video.empty())fs::copy_file(e.video,dest/e.video.filename(),fs::copy_options::none,ec);
     if(!ec)fs::copy_file(source,jsonDest,fs::copy_options::none,ec);
-    if(ec){std::error_code ignored;fs::remove(jsonDest,ignored);if(!e.image.empty())fs::remove(dest/e.image.filename(),ignored);fs::remove(dest,ignored);return false;}
+    if(ec){std::error_code ignored;fs::remove(jsonDest,ignored);if(!e.image.empty())fs::remove(dest/e.image.filename(),ignored);if(!e.video.empty())fs::remove(dest/e.video.filename(),ignored);fs::remove(dest,ignored);return false;}
     key=jsonDest.lexically_relative(directory).generic_wstring();return true;
 }
 }
