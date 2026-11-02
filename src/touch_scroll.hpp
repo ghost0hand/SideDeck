@@ -18,7 +18,7 @@ struct Gesture {
     float move(float x,float y,double time,float slop,float maximumSpeed) {
         if(!active)return 0;
         float dx=x-startX,dy=y-startY;
-        if(dx*dx+dy*dy>slop*slop)moved=true;
+        if(dx * dx + dy * dy > slop * slop)moved=true;
         bool first=!scrolling;
         if(eligible && std::fabs(dy)>slop && std::fabs(dy)>=std::fabs(dx)*0.75f)scrolling=true;
         float delta=scrolling ? (first?startY-y:lastY-y) : 0;
