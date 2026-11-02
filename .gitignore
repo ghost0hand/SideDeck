@@ -32,5 +32,6 @@ __pycache__/
 *.pyc
 .vs/
 .idea/
+.workbuddy/
 
 /themes/

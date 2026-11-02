@@ -91,6 +91,17 @@ float tabPillX = 0, tabPillW = 0, tabPillTargetX = 0, tabPillTargetW = 0;
 bool pillReady = false;
 bool themePicker = false;
 int themePick = 0;
+// 长按移除：手柄 Y 或键盘 Delete
+bool removeConfirm = false;
+Item removeItem;
+int removeIndex = 0;
+std::vector<RectF> removeActions;
+RectF removeSheet;
+bool holdArmed = false;
+WORD holdButton = 0;
+DWORD holdStart = 0;
+float holdProgress = 0;
+ULONGLONG deleteKeyDown = 0;
 std::unique_ptr<Bitmap> themeImage,videoFrame,videoSurface;
 wallpaper::Video video;
 bool videoErrorShown=false;
@@ -484,6 +495,52 @@ static void drawJumpPicker(Graphics& g) {
     note.halign=StringAlignmentCenter;
     ui::drawText(g,L"十字键 / 左摇杆选择 · A 跳转 · B 返回",x,y+height-34*S(),width,24*S(),note);
 }
+// 移除操作用固定的警示色，避免被主题配色吞掉。
+static const ui::Color removeAccent(196,64,74);
+static RectF removeSheetRect() {
+    float width=G::W-PADX*2,height=std::min(216*S(),(float)G::H-32*S());
+    return RectF(PADX,(G::H-height)/2,width,height);
+}
+static void drawHoldOverlay(Graphics& g,float x,float y,float w,float h,float progress) {
+    auto& T=ui::theme();
+    ui::fillRoundRect(g,T.panelTop.withA(252),x,y,w,h,16*S());
+    ui::drawRoundRect(g,removeAccent.withA(210),x,y,w,h,16*S(),1.4f);
+    ui::TextStyle text;text.size=12.5f;text.bold=true;text.halign=StringAlignmentCenter;text.color=T.text;
+    ui::drawText(g,G::deleteKeyDown?L"继续按住 Delete 以移除":L"继续按住 RS 以移除",x,y+h*0.22f,w,24*S(),text);
+    float barW=w-36*S(),barH=5*S(),barX=x+18*S(),barY=y+h-18*S();
+    ui::fillRoundRect(g,T.sep,barX,barY,barW,barH,barH*0.5f);
+    ui::fillRoundRect(g,removeAccent,barX,barY,std::max(barH,barW*std::clamp(progress,0.0f,1.0f)),barH,barH*0.5f);
+}
+static void drawRemoveConfirm(Graphics& g) {
+    auto& T=ui::theme();
+    ui::fillRoundRect(g,ui::Color(0,0,0,130),0,0,(float)G::W,(float)G::H,22*S());
+    G::removeSheet=removeSheetRect();
+    RectF sheet=G::removeSheet;
+    ui::fillRoundRect(g,T.panelTop.withA(250),sheet.X,sheet.Y,sheet.Width,sheet.Height,20*S());
+    ui::drawRoundRect(g,T.rim,sheet.X,sheet.Y,sheet.Width,sheet.Height,20*S());
+    float inner=sheet.X+18*S(),innerW=sheet.Width-36*S();
+    ui::TextStyle title;title.size=17;title.bold=true;title.color=T.text;
+    ui::drawText(g,L"移除这个条目？",inner,sheet.Y+16*S(),innerW,30*S(),title);
+    ui::TextStyle name;name.size=13.5f;name.bold=true;name.color=T.text;
+    ui::drawText(g,G::removeItem.title,inner,sheet.Y+52*S(),innerW,24*S(),name);
+    ui::TextStyle path;path.size=10.5f;path.color=T.textFaint;
+    ui::drawText(g,G::removeItem.target.empty()?L"(无路径)":G::removeItem.target,inner,sheet.Y+78*S(),innerW,20*S(),path);
+    ui::TextStyle note;note.size=11;note.color=T.textDim;
+    ui::drawText(g,L"只移除侧边栏里的这一条，不会删除或移动游戏文件",inner,sheet.Y+104*S(),innerW,22*S(),note);
+    float buttonH=44*S(),gap=10*S(),buttonW=(innerW-gap)/2;
+    float buttonY=sheet.GetBottom()-buttonH-18*S();
+    G::removeActions.clear();
+    for(int i=0;i<2;++i) {
+        RectF button(inner+i*(buttonW+gap),buttonY,buttonW,buttonH);
+        G::removeActions.push_back(button);
+        bool danger=i==1;
+        ui::fillRoundRect(g,danger?removeAccent:T.chip,button.X,button.Y,button.Width,button.Height,13*S());
+        if(!danger)ui::drawRoundRect(g,T.sep,button.X,button.Y,button.Width,button.Height,13*S());
+        ui::TextStyle label;label.size=12.5f;label.bold=danger;label.halign=StringAlignmentCenter;
+        label.color=danger?ui::Color(255,246,247):T.textDim;
+        ui::drawText(g,danger?L"移除  A":L"取消  B",button.X,button.Y,button.Width,button.Height,label);
+    }
+}
 static void drawPanel(Graphics& g) {
     auto& T = ui::theme();
     float w = (float)G::W, h = (float)G::H;
@@ -639,6 +696,10 @@ static void drawPanel(Graphics& g) {
             float y = listTop + i * step - G::scroll[G::tabIndex];
             drawItemCard(g, items[i], PADX + pageOffset, y, w - PADX * 2, ITEM_H, i == G::sel[G::tabIndex], 1);
         }
+        if((G::holdArmed || G::deleteKeyDown) && G::holdProgress>0.02f && !items.empty()) {
+            float y = listTop + G::sel[G::tabIndex] * step - G::scroll[G::tabIndex];
+            drawHoldOverlay(g, PADX + pageOffset, y, w - PADX * 2, ITEM_H, G::holdProgress);
+        }
         g.Restore(saved);
 
         if (items.empty()) {
@@ -661,7 +722,7 @@ static void drawPanel(Graphics& g) {
     struct Hint { const wchar_t* k; const wchar_t* v; };
     Hint listHints[] = { { L"↑↓", L"选择" }, { L"A", L"打开" }, { L"LB·RB", L"换页" }, { L"B", L"收起" } };
     if (G::tabIndex == G::htmlTabIndex) listHints[3].v = L"返回";
-    if(G::tabIndex==0) {listHints[2].k=L"LT·RT";listHints[2].v=L"翻整页";}
+    if(G::tabIndex==0) {listHints[2].k=L"RS";listHints[2].v=L"长按移除";}
     Hint readerHints[] = { { L"↑↓", L"滚动" }, { L"RS", L"滚动" }, { L"X", L"顶部" }, { L"B", L"返回" } };
     auto& hints = G::view == 1 ? readerHints : listHints;
     float hx = PADX + 12.0f * S();
@@ -700,6 +761,7 @@ static void drawPanel(Graphics& g) {
     }
     if (G::themePicker) drawThemePicker(g);
     if (G::jumpPicker) drawJumpPicker(g);
+    if (G::removeConfirm) drawRemoveConfirm(g);
 }
 
 static void renderFrame() {
@@ -824,6 +886,8 @@ static void hidePanel(bool restoreFocus) {
     G::restoreOnClose = restoreFocus && G::inputFocus.ownsForeground();
     G::themePicker = false;
     G::jumpPicker = false;
+    G::removeConfirm = false; G::removeActions.clear();
+    G::holdArmed = false; G::holdButton = 0; G::holdProgress = 0; G::deleteKeyDown = 0;
     G::captureHotkey = false;
     G::recordedMask = 0; G::recordArmed = false;
     ReleaseCapture();
@@ -851,7 +915,7 @@ static void rebuildTabs() {
     G::htmlTabIndex = -1;
     Tab games; games.name = L"游戏库";
     // 手动优先
-    for (auto& it : G::cfg.manual) games.items.push_back(it);
+    for (auto& it : G::cfg.manual) if (!libraryindex::removed(G::cfg, it)) games.items.push_back(it);
     // 扫描（来自缓存或即时扫描）
     static std::vector<Item> scanned;
     static bool scannedReady=false;
@@ -869,6 +933,7 @@ static void rebuildTabs() {
         std::sort(scanned.begin(), scanned.end(), [](const Item& a, const Item& b) { return a.title < b.title; });
     }
     for (auto& it : scanned) {
+        if (libraryindex::removed(G::cfg, it)) continue;
         bool dup = false;
         for (auto& m : games.items) if (m.target == it.target) { dup = true; break; }
         if (!dup) games.items.push_back(it);
@@ -943,6 +1008,7 @@ static void toggleFavoritesOnly() {
     if(G::view!=0 || G::tabIndex!=0 || G::jumpPicker)return;
     G::favoritesOnly=!G::favoritesOnly;refreshGameView();G::sel[0]=0;G::scroll[0]=G::scrollTarget[0]=0;
 }
+// ---- 移除条目（只删侧边栏里的条目，不碰游戏文件） ----
 static void snapSelection(int index) {
     cancelTouch(G::hwnd);G::freeScroll=false;
     auto& items=G::tabs[G::tabIndex].items;if(items.empty())return;
@@ -950,6 +1016,39 @@ static void snapSelection(int index) {
     float height=listBottom()-listTop(),step=ITEM_H+ITEM_GAP;
     float target=std::clamp(G::sel[G::tabIndex]*step-height/2+ITEM_H/2,0.0f,std::max(0.0f,(float)items.size()*step-height));
     G::scroll[G::tabIndex]=G::scrollTarget[G::tabIndex]=target;G::focusReady=false;G::dirty=true;
+}
+static bool removableSelection() {
+    return G::view==0 && G::tabIndex==0 && !G::tabs.empty() && !G::sel.empty() &&
+        G::sel[0]>=0 && G::sel[0]<(int)G::tabs[0].items.size();
+}
+static void cancelRemove() {
+    if(!G::removeConfirm)return;
+    G::removeConfirm=false;G::removeActions.clear();G::holdProgress=0;G::dirty=true;
+}
+static void openRemoveConfirm() {
+    G::holdArmed=false;G::holdButton=0;G::holdProgress=0;G::deleteKeyDown=0;
+    if(G::themePicker || G::jumpPicker || !removableSelection() || G::removeConfirm){G::dirty=true;return;}
+    G::removeItem=G::tabs[0].items[G::sel[0]];
+    G::removeIndex=G::sel[0];
+    G::removeConfirm=true;G::removeActions.clear();G::dirty=true;
+}
+static void performRemove() {
+    if(!G::removeConfirm)return;
+    Item item=G::removeItem;
+    int index=G::removeIndex;
+    auto key=libraryindex::identity(item);
+    for(auto it=G::cfg.manual.begin();it!=G::cfg.manual.end();++it)
+        if(libraryindex::identity(*it)==key){G::cfg.manual.erase(it);break;}
+    // 扫描来源的条目靠移除名单挡住，否则下次扫描又会出现。
+    libraryindex::remember(G::cfg.removed,key);
+    libraryindex::forget(G::cfg.favorites,key);
+    G::removeConfirm=false;G::removeActions.clear();G::holdProgress=0;
+    saveCfg();rebuildTabs();
+    G::tabIndex=0;G::view=0;
+    int count=G::tabs.empty()?0:(int)G::tabs[0].items.size();
+    if(count>0)snapSelection(std::clamp(index,0,count-1));
+    else G::dirty=true;
+    toast(L"已移除 · "+item.title);
 }
 static void openJumpPicker() {
     cancelTouch(G::hwnd);
@@ -1000,7 +1099,14 @@ static void chooseThemes(){
 
 static void addGames(const std::vector<std::wstring>& paths) {
     auto result = lib::addManualFiles(G::cfg, paths);
-    if (result.added) { saveCfg(); rebuildTabs(); G::tabIndex = 0; G::sel[0] = 0; }
+    // 重新添加同一个文件等于撤销之前的移除。
+    int restored = 0;
+    for (auto& path : paths) {
+        auto key = libraryindex::identity(lib::App, path);
+        if (std::find(G::cfg.removed.begin(), G::cfg.removed.end(), key) != G::cfg.removed.end()) ++restored;
+        libraryindex::forget(G::cfg.removed, key);
+    }
+    if (result.added || restored) { saveCfg(); rebuildTabs(); G::tabIndex = 0; G::sel[0] = 0; }
     int skipped = result.duplicates + result.unsupported + result.missing;
     std::wstring message = L"已添加 " + std::to_wstring(result.added) + L" 个游戏";
     if (result.duplicates) message += L" · 重复 " + std::to_wstring(result.duplicates);
@@ -1236,7 +1342,7 @@ static float listMaximum() {
     return std::max(0.0f,(float)G::tabs[G::tabIndex].items.size()*(ITEM_H+ITEM_GAP)-(listBottom()-listTop()));
 }
 static bool scrollPixels(float distance,bool direct) {
-    if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey || G::themePicker || G::jumpPicker)return false;
+    if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey || G::themePicker || G::jumpPicker || G::removeConfirm)return false;
     float previous=0,next=0;
     if(G::view==1) {
         previous=direct?G::readerScroll:G::readerTarget;
@@ -1255,7 +1361,7 @@ static bool scrollPixels(float distance,bool direct) {
 }
 static bool beginTouch(HWND window,float x,float y) {
     if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey)return false;
-    bool eligible=!G::themePicker && !G::jumpPicker && x>=PADX*0.5f && x<=G::W-PADX*0.5f &&
+    bool eligible=!G::themePicker && !G::jumpPicker && !G::removeConfirm && x>=PADX*0.5f && x<=G::W-PADX*0.5f &&
         y>=(G::view==1 ? HEADER_H+32*S() : listTop()) && y<listBottom();
     bool moving=false;
     if(eligible) {
@@ -1335,6 +1441,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
             if (G::captureHotkey) break;
             if(G::closing || G::dialogOpen)break;
+            if(G::removeConfirm) {
+                bool hit=false;
+                for(size_t i=0;i<G::removeActions.size();++i)if(G::removeActions[i].Contains((float)x,(float)y)) {
+                    if(i==1)performRemove();else cancelRemove();
+                    hit=true;break;
+                }
+                if(!hit && !G::removeSheet.Contains((float)x,(float)y))cancelRemove();
+                break;
+            }
             if(G::jumpPicker) {
                 for(size_t i=0;i<G::jumpCells.size();++i)if(G::jumpCells[i].Contains((float)x,(float)y)){jumpTo(G::jumpLetters[i]);break;}
                 break;
@@ -1417,6 +1532,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (wp == VK_ESCAPE) { G::captureHotkey = false; G::recordedMask = 0; G::recordArmed = false; G::dirty = true; }
                 break;
             }
+            if (G::removeConfirm) {
+                if (wp == VK_RETURN) performRemove();
+                else if (wp == VK_ESCAPE || wp == VK_BACK) cancelRemove();
+                break;
+            }
+            if (wp == VK_DELETE) {
+                // 长按 Delete 进入移除确认，避免误触；首帧只记时间。
+                if (!(lp & (1 << 30))) G::deleteKeyDown = GetTickCount64();
+                else if (G::deleteKeyDown && GetTickCount64() - G::deleteKeyDown >= (ULONGLONG)std::clamp(G::cfg.holdRemoveMs, 400, 3000))
+                    openRemoveConfirm();
+                break;
+            }
             if (wp == VK_ESCAPE) { if (G::themePicker || G::jumpPicker) goBack(); else hidePanel(); }
             else if(wp==VK_F2)toggleFavorite();
             else if(wp==VK_F3)openJumpPicker();
@@ -1430,6 +1557,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             else if (wp == VK_BACK) goBack();
             else if(wp==VK_NEXT)navigate(std::max(1,(int)((listBottom()-listTop())/(ITEM_H+ITEM_GAP))));
             else if(wp==VK_PRIOR)navigate(-std::max(1,(int)((listBottom()-listTop())/(ITEM_H+ITEM_GAP))));
+            break;
+        }
+        case WM_KEYUP: {
+            if (wp == VK_DELETE) { G::deleteKeyDown = 0; G::holdProgress = 0; G::dirty = true; }
             break;
         }
         case WM_HOTKEY: {
@@ -1736,6 +1867,14 @@ static void tickAnim(float elapsed = -1) {
     }
     G::video.playing(G::visible && !G::closing);
     if (!G::visible) return;
+    // 键盘长按 Delete：靠按键重复推进进度，到达阈值后弹确认框。
+    if (G::deleteKeyDown && !G::closing) {
+        DWORD threshold = (DWORD)std::clamp(G::cfg.holdRemoveMs, 400, 3000);
+        ULONGLONG held = GetTickCount64() - G::deleteKeyDown;
+        G::holdProgress = std::min(1.0f, (float)held / (float)threshold);
+        G::dirty = true;
+        if (held >= threshold) openRemoveConfirm();
+    }
     if(G::video.take(G::videoFrame,currentThemeEntry().imageOpacity)){wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H,currentThemeEntry().videoFit);G::glassDirty=true;G::dirty=true;}
     if(FAILED(G::video.error()) && !G::videoErrorShown){G::videoErrorShown=true;toast(L"视频壁纸无法播放，请检查文件或系统媒体组件");}
     ULONGLONG now = GetTickCount64();
@@ -1894,6 +2033,33 @@ static void tickGamepad() {
 
     if (G::waitForRelease) {
         if (gp::isNeutral(G::pad.state(idx).Gamepad)) G::waitForRelease = false;
+        G::prevBtn = b; tickAnim(); return;
+    }
+
+    // ---- 移除确认（A 确认 / B 取消） ----
+    if (G::removeConfirm) {
+        if (pressed & Btn::A) performRemove();
+        else if (pressed & (Btn::B | Btn::BACK | Btn::START)) cancelRemove();
+        G::prevBtn = b; tickAnim(); return;
+    }
+
+    // ---- 长按 RS 移除条目（仅游戏库） ----
+    // RS 短按原本无作用，所以长按不会和别的操作抢键。
+    bool canRemove = G::view == 0 && G::tabIndex == 0 && !G::themePicker && !G::jumpPicker;
+    if (G::holdArmed) {
+        if (!(b & Btn::RTHUMB)) {
+            G::holdArmed = false; G::holdButton = 0; G::holdProgress = 0; G::dirty = true;
+            G::prevBtn = b; tickAnim(); return;
+        }
+        DWORD threshold = (DWORD)std::clamp(G::cfg.holdRemoveMs, 400, 3000);
+        DWORD held = now - G::holdStart;
+        G::holdProgress = std::min(1.0f, (float)held / (float)threshold);
+        G::dirty = true;
+        if (held >= threshold) openRemoveConfirm();
+        G::prevBtn = b; tickAnim(); return;
+    }
+    if ((pressed & Btn::RTHUMB) && canRemove) {
+        G::holdArmed = true; G::holdButton = Btn::RTHUMB; G::holdStart = now; G::holdProgress = 0;
         G::prevBtn = b; tickAnim(); return;
     }
 

@@ -42,6 +42,7 @@ struct Config {
     int hotkeyMask = 0x0300;   // LB|RB 默认
     bool longBack = true;      // 长按 BACK 800ms 也可呼出
     int longPressMs = 800;
+    int holdRemoveMs = 800;    // 长按 Y / Delete 多久进入「移除条目」确认
     int width = 460;
     int edge = 0;              // 0=右 1=左
     int margin = 24;
@@ -55,6 +56,7 @@ struct Config {
     std::wstring pauseKey;     // 呼出时向游戏发送的按键（如 esc）
     bool inputIsolation = false;
     std::vector<std::wstring> favorites;
+    std::vector<std::wstring> removed; // 用户移除的条目（kind|target），阻止扫描结果重新出现
     std::vector<Item> manual;  // 手动添加
     std::vector<Tab> extraTabs;
 };
@@ -432,6 +434,7 @@ inline void loadConfig(Config& c) {
     c.hotkeyMask = v.getInt("hotkeyMask", c.hotkeyMask);
     c.longBack = v.getBool("longBack", c.longBack);
     c.longPressMs = v.getInt("longPressMs", c.longPressMs);
+    c.holdRemoveMs = v.getInt("holdRemoveMs", c.holdRemoveMs);
     c.width = v.getInt("width", c.width);
     c.edge = v.getInt("edge", c.edge);
     c.margin = v.getInt("margin", c.margin);
@@ -445,12 +448,15 @@ inline void loadConfig(Config& c) {
     c.inputIsolation = v.getBool("inputIsolation", false);
     c.favorites.clear();
     if(v.has("favorites") && v["favorites"].isArr())for(auto& favorite:v["favorites"].arr)if(favorite.isStr())c.favorites.push_back(ui::utf8(favorite.str));
+    c.removed.clear();
+    if(v.has("removed") && v["removed"].isArr())for(auto& key:v["removed"].arr)if(key.isStr())c.removed.push_back(ui::utf8(key.str));
     if (v.has("scale")) c.scale = (float)v["scale"].numOr(1.35);
     if (!std::isfinite(c.scale)) c.scale = 1.35f;
     c.scale = std::clamp(c.scale, 0.75f, 2.5f);
     c.width = std::clamp(c.width, 320, 1200);
     c.margin = std::clamp(c.margin, 0, 200);
     c.longPressMs = std::clamp(c.longPressMs, 200, 5000);
+    c.holdRemoveMs = std::clamp(c.holdRemoveMs, 400, 3000);
     c.hotkeyMask &= 0xF7FF;
     c.edge = c.edge == 1 ? 1 : 0;
     c.manual.clear(); c.extraTabs.clear();
@@ -490,6 +496,7 @@ inline void saveConfig(const Config& c) {
     v["hotkeyMask"] = sj::Value(c.hotkeyMask);
     v["longBack"] = sj::Value(c.longBack);
     v["longPressMs"] = sj::Value(c.longPressMs);
+    v["holdRemoveMs"] = sj::Value(c.holdRemoveMs);
     v["width"] = sj::Value(c.width);
     v["edge"] = sj::Value(c.edge);
     v["margin"] = sj::Value(c.margin);
@@ -503,6 +510,8 @@ inline void saveConfig(const Config& c) {
     v["inputIsolation"] = sj::Value(c.inputIsolation);
     sj::Array favorites;for(auto& favorite:c.favorites)favorites.push_back(sj::Value(ui::narrow(favorite)));
     v["favorites"]=sj::Value(favorites);
+    sj::Array removed;for(auto& key:c.removed)removed.push_back(sj::Value(ui::narrow(key)));
+    v["removed"]=sj::Value(removed);
     v["scale"] = sj::Value((double)c.scale);
     sj::Array man;
     for (auto& it : c.manual) {

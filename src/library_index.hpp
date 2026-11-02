@@ -1,10 +1,12 @@
 #pragma once
 #include "library.hpp"
 namespace libraryindex {
-inline std::wstring identity(const lib::Item& item) {
-    auto target=item.target;
+inline std::wstring identity(int kind,std::wstring target) {
     if(target.find(L"://")==std::wstring::npos) {std::replace(target.begin(),target.end(),L'/',L'\\');target=lib::toLowerCp(target);}
-    return std::to_wstring(item.kind)+L"|"+target;
+    return std::to_wstring(kind)+L"|"+target;
+}
+inline std::wstring identity(const lib::Item& item) {
+    return identity(item.kind,item.target);
 }
 inline wchar_t initial(const std::wstring& title) {
     for(size_t i=0;i<title.size();++i) {
@@ -44,6 +46,17 @@ inline bool toggle(lib::Config& config,const lib::Item& item) {
     auto key=identity(item);auto found=std::find(config.favorites.begin(),config.favorites.end(),key);
     if(found!=config.favorites.end()) {config.favorites.erase(found);return false;}
     config.favorites.push_back(key);return true;
+}
+inline bool removed(const lib::Config& config,const lib::Item& item) {
+    auto key=identity(item);
+    return std::find(config.removed.begin(),config.removed.end(),key)!=config.removed.end();
+}
+inline void remember(std::vector<std::wstring>& list,const std::wstring& key) {
+    if(key.empty()||std::find(list.begin(),list.end(),key)!=list.end())return;
+    list.push_back(key);
+}
+inline void forget(std::vector<std::wstring>& list,const std::wstring& key) {
+    list.erase(std::remove(list.begin(),list.end(),key),list.end());
 }
 inline int find(const std::vector<lib::Item>& items,wchar_t letter,int after=-1) {
     for(size_t step=1;step<=items.size();++step) {

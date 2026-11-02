@@ -261,6 +261,46 @@ int main() {
         jumpTo(L'J');assert(!G::jumpPicker && G::tabs[0].items[G::sel[0]].title==L"剑星");
         WndProc(nullptr,WM_KEYDOWN,L'B',0);assert(G::tabs[0].items[G::sel[0]].title==L"八方旅人");
         int beforeJump=G::sel[0];jumpTo(L'Q');assert(G::sel[0]==beforeJump);
+        // 长按移除：只删条目，确认后配置与列表同步，移除名单能挡住重扫回来的条目。
+        G::cfg.scanSteam=G::cfg.scanEpic=G::cfg.scanStartMenu=false;G::rescanRequested=true;
+        G::tabIndex=0;G::view=0;rebuildTabs();
+        int manualBefore=(int)G::cfg.manual.size(),itemsBefore=(int)G::tabs[0].items.size();
+        assert(itemsBefore==manualBefore && itemsBefore>0);
+        G::sel[0]=0;std::wstring removedTitle=G::tabs[0].items[0].title,removedTarget=G::tabs[0].items[0].target;
+        openRemoveConfirm();assert(G::removeConfirm && G::removeItem.title==removedTitle);
+        G::dirty=false;G::focusReady=G::pillReady=false;snapshot(root+L"/remove-confirm.png");
+        assert(G::removeActions.size()==2);
+        WndProc(nullptr,WM_SIDEDECK_TAP,0,MAKELPARAM((int)(G::removeActions[0].X+5),(int)(G::removeActions[0].Y+5)));
+        assert(!G::removeConfirm && (int)G::cfg.manual.size()==manualBefore);
+        // 键盘：长按 Delete 才进确认，短按不动作
+        G::cfg.holdRemoveMs=400;
+        WndProc(nullptr,WM_KEYDOWN,VK_DELETE,0);assert(!G::removeConfirm);
+        Sleep(450);WndProc(nullptr,WM_KEYDOWN,VK_DELETE,(LPARAM)(1<<30));
+        assert(G::removeConfirm && G::removeItem.title==removedTitle);
+        WndProc(nullptr,WM_KEYUP,VK_DELETE,0);
+        WndProc(nullptr,WM_KEYDOWN,VK_ESCAPE,0);assert(!G::removeConfirm);
+        G::cfg.holdRemoveMs=800;assert(G::deleteKeyDown==0);
+        WndProc(nullptr,WM_KEYDOWN,VK_DELETE,0);
+        Sleep(850);WndProc(nullptr,WM_KEYDOWN,VK_DELETE,(LPARAM)(1<<30));
+        assert(G::removeConfirm);
+        WndProc(nullptr,WM_KEYDOWN,VK_RETURN,0);
+        assert(!G::removeConfirm && (int)G::cfg.manual.size()==manualBefore-1);
+        assert((int)G::tabs[0].items.size()==itemsBefore-1);
+        assert(std::none_of(G::tabs[0].items.begin(),G::tabs[0].items.end(),[&](const Item& i){return i.title==removedTitle;}));
+        {lib::Config persisted;lib::loadConfig(persisted);
+         assert((int)persisted.manual.size()==manualBefore-1 && persisted.removed.size()==1);}
+        Item ghost;ghost.kind=lib::App;ghost.title=L"移除样例";ghost.target=removedTarget;
+        assert(libraryindex::removed(G::cfg,ghost));
+        G::cfg.manual.push_back(ghost);rebuildTabs();
+        assert(std::none_of(G::tabs[0].items.begin(),G::tabs[0].items.end(),[](const Item& i){return i.title==L"移除样例";}));
+        libraryindex::forget(G::cfg.removed,libraryindex::identity(ghost));rebuildTabs();
+        assert(std::any_of(G::tabs[0].items.begin(),G::tabs[0].items.end(),[](const Item& i){return i.title==L"移除样例";}));
+        G::cfg.manual.pop_back();G::cfg.removed.clear();rebuildTabs();
+        // 长按过程的可视反馈
+        G::sel[0]=0;G::holdArmed=true;G::holdProgress=0.6f;G::focusReady=G::pillReady=false;
+        snapshot(root+L"/remove-hold.png");
+        G::holdArmed=false;G::holdProgress=0;G::deleteKeyDown=0;
+        assert((int)G::cfg.manual.size()==manualBefore-1);
         {ui::IconCache background; background.enableAsync();assert(background.get(root+L"/landscape.png",48)==nullptr);
          for(int wait=0;wait<200 && background.revision()==0;++wait)Sleep(5);
          assert(background.revision()==1 && background.get(root+L"/landscape.png",48));background.clear();}
@@ -386,5 +426,5 @@ int main() {
         G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();G::themeImage.reset();ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, guides and cleanup");
+    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, entry removal, guides and cleanup");
 }
