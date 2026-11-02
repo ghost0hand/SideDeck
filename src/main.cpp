@@ -2076,6 +2076,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     wc.hInstance = hInstance;
     wc.lpszClassName = L"SideDeckOverlay";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+    wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
     RegisterClassExW(&wc);
     LOG("class ok");
     computeGeometry();
@@ -2090,38 +2093,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     LOG("tray block");
     // 托盘
     {
-        // 自绘图标：32x32 渐变圆角块
-        HDC scr = GetDC(nullptr);
-        BITMAPINFO bi{};
-        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bi.bmiHeader.biWidth = 32; bi.bmiHeader.biHeight = -32;
-        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-        void* bits = nullptr;
-        HBITMAP hb = CreateDIBSection(scr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        BYTE* p = (BYTE*)bits;
-        for (int y = 0; y < 32; y++) for (int x = 0; x < 32; x++) {
-            float t = (x + y) / 62.0f;
-            int r = (int)(124 + (34 - 124) * t), g2 = (int)(92 + (211 - 92) * t), b = (int)(255 + (238 - 255) * t);
-            BYTE a = 255;
-            // 圆角
-            int rad = 8; bool corner = false;
-            if ((x < rad && y < rad) || (x > 31 - rad && y < rad) || (x < rad && y > 31 - rad) || (x > 31 - rad && y > 31 - rad)) {
-                int cx = x < rad ? rad : 31 - rad, cy = y < rad ? rad : 31 - rad;
-                if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > rad * rad) { a = 0; corner = true; }
-            }
-            // 中间三横条（列表感）
-            if (!corner && y >= 10 && y <= 22 && (y % 6 != 5) && x >= 8 && x <= 24 && (y == 10 || y == 11 || y == 16 || y == 17 || y == 22)) {
-                r = 255; g2 = 255; b = 255;
-            }
-            BYTE* q = p + (y * 32 + x) * 4;
-            q[0] = (BYTE)b; q[1] = (BYTE)g2; q[2] = (BYTE)r; q[3] = a;
-        }
-        HBITMAP hmask = CreateBitmap(32, 32, 1, 1, nullptr);
-        ICONINFO ii{};
-        ii.fIcon = TRUE; ii.hbmColor = hb; ii.hbmMask = hmask;
-        HICON icon = CreateIconIndirect(&ii);
-        DeleteObject(hb); DeleteObject(hmask);
-        ReleaseDC(nullptr, scr);
+        // 图标来自 exe 资源（src/SideDeck.ico），与任务栏、安装器保持同一套
+        HICON icon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
+        HICON iconLarge = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED);
+        G::nid.hIcon = icon ? icon : iconLarge;
 
         G::nid.cbSize = sizeof(G::nid);
         G::nid.hWnd = G::hwnd;
@@ -2182,7 +2159,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     UnregisterHotKey(G::hwnd, 1);
     DestroyWindow(G::hwnd);
     if (G::hTrayMenu) DestroyMenu(G::hTrayMenu);
-    if (G::nid.hIcon) DestroyIcon(G::nid.hIcon);
+    // G::nid.hIcon 由 LoadImage(LR_SHARED) 返回，由系统管理，不手动销毁
     delete G::backdrop;
     G::backdrop = nullptr;
     // 抓屏线程必须在 GDI+ 关闭前收尾，避免它在 GdiplusShutdown 之后还在建位图。

@@ -1,4 +1,7 @@
 #include <windows.h>
+
+// 应用图标：tools/make-icon.py 由 docs/icon.svg 生成
+1 ICON "SideDeck.ico"
 #include "sidedeck_version.hpp"
 1 VERSIONINFO
 FILEVERSION SIDEDECK_VERSION_PARTS

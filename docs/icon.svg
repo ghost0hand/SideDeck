@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%" role="img" aria-label="SideDeck">
+  <title>SideDeck</title>
+  <desc>深色圆角底板上的冰蓝色玻璃 S 丝带，带轻微厚度与柔和高光。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#202B3B"/>
+      <stop offset="0.46" stop-color="#0D1420"/>
+      <stop offset="1" stop-color="#05080E"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="0.28" cy="0.12" r="0.9">
+      <stop offset="0" stop-color="#8BDFFF" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#5E9FDB" stop-opacity="0.035"/>
+      <stop offset="1" stop-color="#05080E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ribbon" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#F5FCFF"/>
+      <stop offset="0.28" stop-color="#C9F0FF"/>
+      <stop offset="0.63" stop-color="#82CDED"/>
+      <stop offset="1" stop-color="#4B8FB9"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="0.45" stop-color="#C8EDFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#80C8EC" stop-opacity="0.36"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E6F7FF" stop-opacity="0.35"/>
+      <stop offset="0.45" stop-color="#C7E9FF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#8AC4E8" stop-opacity="0.13"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#aura)"/>
+
+  <!-- 极轻的环境光，避免纯白图形显得扁平。 -->
+  <path d="M169 76 C153 62 130 58 108 64 C84 70 73 86 78 102 C83 119 103 124 128 129 C154 134 174 144 174 163 C174 185 151 198 122 198 C98 198 77 189 63 174"
+        fill="none" stroke="#60C7F4" stroke-opacity="0.20" stroke-width="32"
+        stroke-linecap="round" filter="url(#soft)"/>
+
+  <!-- 向下偏移的同形轮廓提供一点厚度，不做复杂叠层。 -->
+  <path d="M169 82 C153 68 130 64 108 70 C84 76 73 92 78 108 C83 125 103 130 128 135 C154 140 174 150 174 169 C174 191 151 204 122 204 C98 204 77 195 63 180"
+        fill="none" stroke="#497F9F" stroke-opacity="0.30" stroke-width="25" stroke-linecap="round"/>
+
+  <path d="M169 76 C153 62 130 58 108 64 C84 70 73 86 78 102 C83 119 103 124 128 129 C154 134 174 144 174 163 C174 185 151 198 122 198 C98 198 77 189 63 174"
+        fill="none" stroke="url(#ribbon)" stroke-width="25" stroke-linecap="round"/>
+  <path d="M169 76 C153 62 130 58 108 64 C84 70 73 86 78 102 C83 119 103 124 128 129 C154 134 174 144 174 163 C174 185 151 198 122 198 C98 198 77 189 63 174"
+        fill="none" stroke="url(#edge)" stroke-width="1.2" stroke-linecap="round" transform="translate(-1 -8)"/>
+
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="55.25"
+        fill="none" stroke="url(#rim)" stroke-width="1.5"/>
+</svg>

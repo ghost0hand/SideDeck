@@ -20,6 +20,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\SideDeck.exe
+SetupIconFile={#Root}src\SideDeck.ico
 CloseApplications=yes
 RestartApplications=no
 VersionInfoVersion={#AppVersion}.0
