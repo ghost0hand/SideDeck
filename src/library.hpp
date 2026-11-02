@@ -43,6 +43,12 @@ struct Config {
     bool longBack = true;      // 长按 BACK 800ms 也可呼出
     int longPressMs = 800;
     int holdRemoveMs = 800;    // 长按 Y / Delete 多久进入「移除条目」确认
+    // 玻璃拟态强度，乘在主题自带配色之上；1.0 = 主题原样
+    float glassBlur = 1.0f;    // 背景模糊倍率
+    float glassOpacity = 1.0f; // 背景可见度倍率
+    float glassTint = 1.0f;    // 玻璃渐变浓度倍率
+    float glassSheen = 1.0f;   // 顶部光泽与边框强度倍率
+    float glassRadius = 1.0f;  // 面板圆角倍率
     int width = 460;
     int edge = 0;              // 0=右 1=左
     int margin = 24;
@@ -435,6 +441,17 @@ inline void loadConfig(Config& c) {
     c.longBack = v.getBool("longBack", c.longBack);
     c.longPressMs = v.getInt("longPressMs", c.longPressMs);
     c.holdRemoveMs = v.getInt("holdRemoveMs", c.holdRemoveMs);
+    auto glassFloat = [&](const char* key, float fallback) {
+        auto found = v.find(key);
+        if (!found || !found->isNum()) return fallback;
+        float value = (float)found->num;
+        return std::isfinite(value) ? value : fallback;
+    };
+    c.glassBlur = glassFloat("glassBlur", c.glassBlur);
+    c.glassOpacity = glassFloat("glassOpacity", c.glassOpacity);
+    c.glassTint = glassFloat("glassTint", c.glassTint);
+    c.glassSheen = glassFloat("glassSheen", c.glassSheen);
+    c.glassRadius = glassFloat("glassRadius", c.glassRadius);
     c.width = v.getInt("width", c.width);
     c.edge = v.getInt("edge", c.edge);
     c.margin = v.getInt("margin", c.margin);
@@ -457,6 +474,11 @@ inline void loadConfig(Config& c) {
     c.margin = std::clamp(c.margin, 0, 200);
     c.longPressMs = std::clamp(c.longPressMs, 200, 5000);
     c.holdRemoveMs = std::clamp(c.holdRemoveMs, 400, 3000);
+    c.glassBlur = std::clamp(c.glassBlur, 0.3f, 2.4f);
+    c.glassOpacity = std::clamp(c.glassOpacity, 0.3f, 1.5f);
+    c.glassTint = std::clamp(c.glassTint, 0.4f, 1.6f);
+    c.glassSheen = std::clamp(c.glassSheen, 0.2f, 2.0f);
+    c.glassRadius = std::clamp(c.glassRadius, 0.4f, 1.8f);
     c.hotkeyMask &= 0xF7FF;
     c.edge = c.edge == 1 ? 1 : 0;
     c.manual.clear(); c.extraTabs.clear();
@@ -497,6 +519,11 @@ inline void saveConfig(const Config& c) {
     v["longBack"] = sj::Value(c.longBack);
     v["longPressMs"] = sj::Value(c.longPressMs);
     v["holdRemoveMs"] = sj::Value(c.holdRemoveMs);
+    v["glassBlur"] = sj::Value((double)c.glassBlur);
+    v["glassOpacity"] = sj::Value((double)c.glassOpacity);
+    v["glassTint"] = sj::Value((double)c.glassTint);
+    v["glassSheen"] = sj::Value((double)c.glassSheen);
+    v["glassRadius"] = sj::Value((double)c.glassRadius);
     v["width"] = sj::Value(c.width);
     v["edge"] = sj::Value(c.edge);
     v["margin"] = sj::Value(c.margin);

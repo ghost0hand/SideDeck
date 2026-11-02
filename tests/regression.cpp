@@ -3,6 +3,7 @@
 #include "../src/main.cpp"
 #undef WinMain
 #include <cassert>
+#include <chrono>
 
 static void writeText(const std::wstring& path, const std::string& text) {
     FILE* file = _wfopen(path.c_str(), L"wb"); assert(file);
@@ -363,6 +364,38 @@ int main() {
            assert(first.GetR()>240 && last.GetB()>240);
            wallpaper::raster(&source,output,100,100,"cover");output->GetPixel(50,50,&first);assert(first.GetG()>170);
          }}
+        // 视频帧在解码线程合成：紧排 BGRA -> 面板尺寸预乘 RGBA。
+        {const int sw=2,sh=2,dw=8,dh=6;std::vector<BYTE> source((size_t)sw*sh*4),dest((size_t)dw*dh*4,0);
+         for(size_t i=0;i<source.size();i+=4){source[i]=100;source[i+1]=150;source[i+2]=200;source[i+3]=255;}
+         wallpaper::scalePremultiplied(source.data(),sw,sh,dest.data(),dw,dh,"auto",128);
+         for(size_t i=0;i<dest.size();i+=4){assert(dest[i+3]==128);assert(abs((int)dest[i]-50)<=2 && abs((int)dest[i+1]-75)<=2 && abs((int)dest[i+2]-100)<=2);}
+         std::vector<BYTE> opaque((size_t)dw*dh*4,0);
+         wallpaper::scalePremultiplied(source.data(),sw,sh,opaque.data(),dw,dh,"auto",255);
+         assert(opaque[3]==255 && abs((int)opaque[0]-100)<=2);}
+        // 动态壁纸路径：视频帧只贴图，玻璃上下层不跟着失效。
+        {G::tabIndex=0;G::view=0;G::renderCaching=true;G::themeProgress=1;G::glassDirty=true;
+         G::waitingForRelease=false;G::closing=false;G::anim=1;G::visible=true;
+         G::videoSurface=std::make_unique<Bitmap>(G::W,G::H,PixelFormat32bppPARGB);G::paperActive=true;
+         {Graphics vg(G::videoSurface.get());vg.Clear(Gdiplus::Color(200,40,60,90));}
+         G::focusReady=G::pillReady=false;snapshot(root+L"/video-layered.png");
+         assert(G::glassUnder && G::glassOver);
+         unsigned rebuilds=G::glassRebuilds;
+         snapshot(root+L"/video-layered-stable.png");   // 新的一帧只是换纸，不该重画玻璃
+         assert(G::glassRebuilds==rebuilds);
+         G::glassDirty=true;snapshot(root+L"/video-layered-dirty.png");
+         assert(G::glassRebuilds>rebuilds);             // 显式失效才重建
+         G::videoSurface.reset();G::paperActive=false;G::glassDirty=true;G::glassUnder.reset();G::glassOver.reset();}
+        // 背景抓屏走后台线程，呼出时不能阻塞。
+        {auto start=std::chrono::steady_clock::now();
+         requestBackdrop();
+         double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+         assert(elapsed<8.0);  // 同步抓屏约 25ms，异步应立即返回
+         for(int i=0;i<400 && G::backdropBusy.load();++i)Sleep(10);
+         assert(!G::backdropBusy.load());
+         G::backdropWorker.join();
+         bool have=false;
+         {std::lock_guard<std::mutex> lock(G::backdropMutex);have=G::backdropResult!=nullptr;}
+         if(have){applyBackdropResult();assert(G::backdrop!=nullptr);delete G::backdrop;G::backdrop=nullptr;}}
         // Import must be self-contained, reject malformed data and preserve stable selection.
         auto fixtures=std::filesystem::path(root)/(L"theme-fixtures-"+std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(fixtures/L"source");
@@ -417,13 +450,69 @@ int main() {
             snapshot(root+L"/pack-"+std::to_wstring(i)+L".png");
         }
         G::themePicker=true;G::themePick=4;snapshot(root+L"/theme-picker-page2.png");G::themePicker=false;
+        // 玻璃参数：档位循环、立即生效、落盘、恢复默认。
+        {G::view=0;G::tabIndex=2;G::themeProgress=1;G::renderCaching=true;G::toastT=0;
+         G::waitingForRelease=false;G::closing=false;G::anim=1;G::visible=true;
+         G::cfg.glassBlur=G::cfg.glassOpacity=G::cfg.glassTint=G::cfg.glassSheen=G::cfg.glassRadius=1.0f;
+         G::focusReady=G::pillReady=false;snapshot(root+L"/tools-glyphs.png");
+         openGlassPicker();assert(G::glassPicker && G::glassPick==0);
+         navigate(2);assert(G::glassPick==2);
+         float tintBefore=G::cfg.glassTint;
+         cycleGlass();assert(G::cfg.glassTint>tintBefore);
+         assert(ui::theme().glassTop.a>currentThemeEntry().palette.glassTop.a);   // 浓度已作用到调色板
+         G::glassPick=0;int blurStep=glassStepIndex(gGlassRows[0]);cycleGlass();
+         assert(glassStepIndex(gGlassRows[0])==blurStep+1);                       // 模糊影响背景图，需重新抓屏
+         G::glassPick=4;cycleGlass();assert(G::cfg.glassRadius>1.0f);
+         {lib::Config savedGlass;lib::loadConfig(savedGlass);
+          assert(savedGlass.glassRadius>1.0f && savedGlass.glassTint>1.0f);}
+         G::focusReady=G::pillReady=false;snapshot(root+L"/glass-picker.png");
+         G::glassPick=GLASS_PARAMS;resetGlass();assert(G::glassPicker);
+         assert(G::cfg.glassBlur==1.0f && G::cfg.glassTint==1.0f && G::cfg.glassRadius==1.0f);
+         closeGlassPicker();assert(!G::glassPicker);
+         G::tabIndex=0;G::view=0;}
+
+        // 分辨率/DPI 自适应：UI 缩放 = 用户倍率 × DPI 因子，行缓存按字节封顶。
+        {G::view=0;G::tabIndex=0;G::cfg.scale=1.35f;G::screenScale=1.0f;ui::g_textScale=S();
+         assert(fabsf(S()-1.35f)<0.001f);
+         // 1080p / 125% 与以前完全一致；2K、4K 按分辨率抬升；高 DPI 可以继续抬高
+         assert(fabsf(screenScaleFor(1080,120)-1.0f)<0.001f);
+         assert(fabsf(screenScaleFor(1080,96)-1.0f)<0.001f);
+         assert(fabsf(screenScaleFor(1440,96)-1.349f)<0.01f);
+         assert(fabsf(screenScaleFor(2160,144)-2.047f)<0.01f);
+         assert(fabsf(screenScaleFor(2160,288)-2.4f)<0.01f);
+         assert(fabsf(screenScaleFor(4320,192)-2.6f)<0.001f);   // 上限
+         float baseItem=ITEM_H,basePad=PADX;
+         G::screenScale=2.0f;ui::g_textScale=S();
+         assert(fabsf(S()-2.7f)<0.001f && fabsf(ITEM_H-baseItem*2.0f)<0.01f && fabsf(PADX-basePad*2.0f)<0.01f);
+         G::W=1242;G::H=2064;G::toastT=0;G::anim=G::pageAnim=1;G::themeProgress=1;G::renderCaching=true;
+         G::waitingForRelease=false;G::closing=false;G::visible=true;G::glassDirty=true;clearRowCache();
+         G::focusReady=G::pillReady=false;snapshot(root+L"/ratio-4k.png");
+         // 4K 下 400 张卡片不能突破缓存预算
+         int original=(int)G::tabs[0].items.size();
+         for(int i=0;i<400;++i){Item it;it.kind=lib::Guide;it.title=L"缩放样例 "+std::to_wstring(i);it.subtitle=L"cache";G::tabs[0].items.push_back(it);}
+         {Bitmap scratch(G::W,G::H,PixelFormat32bppPARGB);Graphics sg(&scratch);sg.SetSmoothingMode(SmoothingModeHighQuality);
+          for(int i=0;i<60;++i){G::sel[0]=i;sg.Clear(Gdiplus::Color(0,0,0,0));drawPanel(sg);}}
+         assert(G::rowBytes<=G::ROW_CACHE_BUDGET);
+         assert(G::rowCache.size()<128); // 超预算后按字节淘汰，而不是全部清空
+         G::tabs[0].items.resize(original);G::sel[0]=0;
+         // 手动切换界面缩放：改配置、重算几何、落盘
+         applyUiScale(1.6f);
+         assert(fabsf(G::cfg.scale-1.6f)<0.001f);
+         {lib::Config saved;lib::loadConfig(saved);assert(fabsf(saved.scale-1.6f)<0.001f);}
+         G::cfg.scale=1.0f;G::screenScale=1.0f;ui::g_textScale=S();G::W=540;G::H=960;
+         clearRowCache();G::glassCache.reset();G::focusReady=G::pillReady=false;}
         G::themeImage.reset();G::cfg.themeFile.clear();themes::reload(fixtures/L"empty");
         writeText(lib::configPath(), R"({"theme":999,"scale":-8,"width":0,"margin":-3})");
         lib::Config bounds; lib::loadConfig(bounds);
         assert(bounds.theme == 3 && bounds.scale == 0.75f && bounds.width == 320 && bounds.margin == 0);
         DeleteFileW(lib::configPath().c_str());
         delete G::backdrop; G::backdrop = nullptr;
-        G::iconCache.clear(); G::imageCache.clear();G::rowCache.clear();G::glassCache.reset();G::themeImage.reset();ui::fontCache.clear(); releaseDib();
+        // 所有 GDI+ 位图必须在 GdiplusShutdown 之前释放，否则静态析构会崩。
+        G::iconCache.clear(); G::imageCache.clear();clearRowCache();
+        G::glassCache.reset();G::glassUnder.reset();G::glassOver.reset();
+        G::themeImage.reset();G::videoSurface.reset();G::backdropWorker.join();
+        {std::lock_guard<std::mutex> lock(G::backdropMutex);G::backdropResult.reset();}
+        ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
     puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, entry removal, guides and cleanup");

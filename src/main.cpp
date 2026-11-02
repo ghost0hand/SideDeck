@@ -58,8 +58,15 @@ std::vector<RectF> libraryActions,jumpCells;
 std::wstring jumpLetters=L"ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
 bool jumpAvailable[27]{};
 std::map<std::wstring,std::unique_ptr<Bitmap>> rowCache;
-std::unique_ptr<Bitmap> glassCache;
+std::deque<std::wstring> rowOrder;   // 插入顺序，按字节预算淘汰
+size_t rowBytes=0;
+constexpr size_t ROW_CACHE_BUDGET=24ull*1024*1024;  // 卡片缓存上限：4K 下 128 张会到 100MB 以上
+std::unique_ptr<Bitmap> glassCache;      // 无动态壁纸时：背景+渐变合成成一张
+std::unique_ptr<Bitmap> glassUnder;      // 动态壁纸时：背景模糊层（在视频下面）
+std::unique_ptr<Bitmap> glassOver;       // 动态壁纸时：渐变+光泽（在视频上面）
 int glassWidth=0,glassHeight=0,glassTheme=-1;
+int glassUnderW=0,glassUnderH=0,glassUnderTheme=-1;
+unsigned glassRebuilds=0;   // 玻璃层重建次数（性能诊断/回归用）
 unsigned rowRevision=0;
 bool renderCaching=true;
 bool glassDirty=false;
@@ -91,6 +98,10 @@ float tabPillX = 0, tabPillW = 0, tabPillTargetX = 0, tabPillTargetW = 0;
 bool pillReady = false;
 bool themePicker = false;
 int themePick = 0;
+bool glassPicker = false;      // 玻璃参数面板
+int glassPick = 0;
+std::vector<RectF> glassRows;
+RectF glassSheet;
 // 长按移除：手柄 Y 或键盘 Delete
 bool removeConfirm = false;
 Item removeItem;
@@ -102,7 +113,22 @@ WORD holdButton = 0;
 DWORD holdStart = 0;
 float holdProgress = 0;
 ULONGLONG deleteKeyDown = 0;
-std::unique_ptr<Bitmap> themeImage,videoFrame,videoSurface;
+std::unique_ptr<Bitmap> themeImage,videoSurface;
+bool paperActive=false;      // 动态壁纸已出帧（此时插画让位给视频）
+// 背景抓屏在后台线程完成，结果通过消息回投，不阻塞呼出动画。
+std::mutex backdropMutex;
+std::unique_ptr<Bitmap> backdropResult;
+int backdropResultW=0,backdropResultH=0;
+std::atomic<bool> backdropBusy{false};
+// 抓屏线程必须在退出前 join：析构时兜底，避免任何路径漏掉 join 触发 std::terminate。
+struct BackdropWorker {
+    std::thread thread;
+    ~BackdropWorker() { if (thread.joinable()) thread.join(); }
+    bool busy() const { return thread.joinable(); }
+    void join() { if (thread.joinable()) thread.join(); }
+    void start(std::thread&& worker) { join(); thread = std::move(worker); }
+};
+BackdropWorker backdropWorker;
 wallpaper::Video video;
 bool videoErrorShown=false;
 ui::Theme themeFrom;
@@ -151,6 +177,7 @@ int padCount = 0;
 int triggerDirection=0;
 DWORD triggerRepeat=0;
 bool rescanRequested = false;
+float screenScale = 1.0f; // 分辨率/DPI 系数，由 computeGeometry 刷新；1080p 上为 1.0
 bool dirty = false;
 }
 
@@ -256,10 +283,28 @@ static void openJumpPicker();
 static void jumpTo(wchar_t letter);
 static void refreshGameView();
 static void cancelTouch(HWND window=nullptr);
+static void requestBackdrop();
 
 // ==================== 绘制 ====================
-// UI 缩放：手持设备/电视串流场景整体放大
-static float S() { return G::cfg.scale; }
+// UI 缩放 = 用户倍率 × 屏幕系数。
+// 屏幕系数以「1080p 可用高度」为基准，让面板始终占屏幕的同一比例：
+// 1080p 上等于 1.0（外观和以前完全一致），1440p ≈ 1.35，4K ≈ 2.05。
+// 系统缩放（比如 4K 笔记本开 300%）还能把系数继续抬高，尊重用户的无障碍设置。
+static float S() { return G::cfg.scale * G::screenScale; }
+// 把主题自带的透明度按玻璃参数缩放；1.0 时等于主题原样。
+static ui::Theme glassAdjusted(ui::Theme palette) {
+    auto scaleAlpha = [](unsigned char value, float factor) {
+        return (unsigned char)std::clamp((int)lroundf(value * factor), 0, 255);
+    };
+    palette.backdropOpacity = std::clamp(palette.backdropOpacity * G::cfg.glassOpacity, 0.02f, 1.0f);
+    palette.glassTop.a = scaleAlpha(palette.glassTop.a, G::cfg.glassTint);
+    palette.glassBottom.a = scaleAlpha(palette.glassBottom.a, G::cfg.glassTint);
+    palette.panel.a = scaleAlpha(palette.panel.a, G::cfg.glassTint);
+    palette.rim.a = scaleAlpha(palette.rim.a, 0.5f + 0.5f * G::cfg.glassSheen);
+    return palette;
+}
+static void setPalette(const ui::Theme& palette) { ui::theme() = glassAdjusted(palette); }
+static float panelRadius() { return 22.0f * S() * G::cfg.glassRadius; }
 #define PADX     (20.0f * S())
 #define HEADER_H (80.0f * S())
 #define TAB_H    (46.0f * S())
@@ -285,6 +330,8 @@ static void paintItemCard(Graphics& g, const Item& it, float x, float y, float w
         else if (it.target == L"__opendir__") glyph = ui::ToolGlyph::Folder;
         else if (it.target == L"__openguides__") glyph = ui::ToolGlyph::Book;
         else if (it.target == L"__editconfig__") glyph = ui::ToolGlyph::Settings;
+        else if (it.target == L"__uiscale__") glyph = ui::ToolGlyph::Scaling;
+        else if (it.target == L"__glass__") glyph = ui::ToolGlyph::Glass;
     }
     auto& cache = G::iconCache;
     std::wstring ip = it.iconPath.empty() ? it.target : it.iconPath;
@@ -324,19 +371,31 @@ static void paintItemCard(Graphics& g, const Item& it, float x, float y, float w
     std::wstring sub = it.subtitle.empty() ? it.target : it.subtitle;
     ui::drawText(g, sub, tx, textY + titleH + gap, tw, subH, t2);
 }
+static void clearRowCache() {
+    G::rowCache.clear();G::rowOrder.clear();G::rowBytes=0;
+}
 static void drawItemCard(Graphics& g,const Item& item,float x,float y,float w,float h,bool selected,float appear) {
     if(!G::renderCaching || G::themeProgress<1) {paintItemCard(g,item,x,y,w,h,selected,appear);return;}
     unsigned revision=G::iconCache.revision();
-    if(revision!=G::rowRevision){G::rowCache.clear();G::rowRevision=revision;}
+    if(revision!=G::rowRevision){clearRowCache();G::rowRevision=revision;}
     std::wstring key=item.title+L"\n"+item.subtitle+L"\n"+item.target+L"\n"+item.iconPath+L"|"+
         std::to_wstring(item.kind)+L"|"+std::to_wstring(item.pinned)+L"|"+std::to_wstring(selected)+L"|"+
         std::to_wstring(G::cfg.theme)+L"|"+std::to_wstring(S())+L"|"+std::to_wstring(w)+L"|"+std::to_wstring(h);
     auto found=G::rowCache.find(key);
     if(found==G::rowCache.end()) {
-        if(G::rowCache.size()>=128)G::rowCache.clear();
+        size_t bytes=(size_t)ceilf(w)*(size_t)ceilf(h)*4;
+        // 按字节而不是条目数淘汰：4K/高缩放下单张卡片就有几百 KB。
+        while(!G::rowOrder.empty() && G::rowBytes+bytes>G::ROW_CACHE_BUDGET) {
+            auto oldest=std::move(G::rowOrder.front());G::rowOrder.pop_front();
+            auto victim=G::rowCache.find(oldest);
+            if(victim==G::rowCache.end())continue;
+            if(victim->second)G::rowBytes-=std::min(G::rowBytes,(size_t)victim->second->GetWidth()*victim->second->GetHeight()*4);
+            G::rowCache.erase(victim);
+        }
         auto bitmap=std::make_unique<Bitmap>((int)ceilf(w),(int)ceilf(h),PixelFormat32bppPARGB);
         {Graphics buffer(bitmap.get());buffer.Clear(Gdiplus::Color(0,0,0,0));buffer.SetSmoothingMode(SmoothingModeHighQuality);paintItemCard(buffer,item,0,0,w,h,selected,appear);}
         found=G::rowCache.emplace(key,std::move(bitmap)).first;
+        G::rowOrder.push_back(key);G::rowBytes+=bytes;
     }
     ui::drawCachedBitmap(g,found->second.get(),x,y);
 }
@@ -421,16 +480,141 @@ static std::filesystem::path themeDirectory(){return std::filesystem::path(lib::
 static int currentTheme(){return themes::selected(G::cfg.theme,G::cfg.themeFile);}
 static const themes::Entry& currentThemeEntry(){return themes::get(currentTheme());}
 static void loadThemeImage(){
-    G::video.close();G::videoFrame.reset();G::videoSurface.reset();G::videoErrorShown=false;
-    G::themeImage.reset();G::rowCache.clear();G::glassCache.reset();
+    G::video.close();G::videoSurface.reset();G::paperActive=false;G::videoErrorShown=false;
+    G::themeImage.reset();clearRowCache();G::glassCache.reset();
+    G::glassUnder.reset();G::glassOver.reset();G::glassDirty=true;
     const auto& entry=currentThemeEntry();
     G::video.open(entry.video.wstring());
+    // 缩放目标下发给解码线程，面板尺寸/主题变化都走这里。
+    G::video.target(G::W,G::H,entry.videoFit,entry.imageOpacity);
     if(!entry.image.empty()){
         auto image=std::make_unique<Bitmap>(entry.image.c_str());
         if(image->GetLastStatus()==Ok)G::themeImage=std::move(image);
     }
 }
 static constexpr int THEME_PAGE_ROWS=4;
+// ==================== 玻璃效果参数 ====================
+static const float kGlassBlurSteps[]={0.4f,0.7f,1.0f,1.4f,1.8f,2.2f};
+static const float kGlassOpacitySteps[]={0.5f,0.75f,1.0f,1.25f};
+static const float kGlassTintSteps[]={0.6f,0.8f,1.0f,1.2f,1.4f};
+static const float kGlassSheenSteps[]={0.4f,0.7f,1.0f,1.4f,1.8f};
+static const float kGlassRadiusSteps[]={0.6f,0.8f,1.0f,1.3f,1.6f};
+struct GlassRowDef {
+    const wchar_t* name;
+    const wchar_t* hint;
+    float* value;
+    const float* steps;
+    int count;
+    bool needsBackdrop;
+};
+static GlassRowDef gGlassRows[] = {
+    {L"背景模糊", L"面板背后画面的虚化程度", &G::cfg.glassBlur, kGlassBlurSteps, 6, true},
+    {L"背景可见", L"背景画面透过玻璃的强度", &G::cfg.glassOpacity, kGlassOpacitySteps, 4, false},
+    {L"玻璃浓度", L"玻璃渐变与底色的厚度", &G::cfg.glassTint, kGlassTintSteps, 5, false},
+    {L"顶部光泽", L"高光与边框的锐利程度", &G::cfg.glassSheen, kGlassSheenSteps, 5, false},
+    {L"面板圆角", L"面板与裁切的圆润程度", &G::cfg.glassRadius, kGlassRadiusSteps, 5, false},
+};
+static constexpr int GLASS_PARAMS = (int)(sizeof(gGlassRows) / sizeof(gGlassRows[0]));
+static constexpr int GLASS_ROWS = GLASS_PARAMS + 1;   // 末行是「恢复默认」
+static int glassStepIndex(const GlassRowDef& row) {
+    int best = 0; float distance = 1e9f;
+    for (int i = 0; i < row.count; ++i) {
+        float delta = fabsf(row.steps[i] - *row.value);
+        if (delta < distance) { distance = delta; best = i; }
+    }
+    return best;
+}
+static std::wstring glassValueText(const GlassRowDef& row) {
+    wchar_t buf[32]{};
+    swprintf(buf, 32, L"%.2f", *row.value);
+    return buf;
+}
+static std::wstring glassSummary() {
+    wchar_t buf[128]{};
+    swprintf(buf, 128, L"模糊 %.2f · 浓度 %.2f · 圆角 %.2f · A 调整",
+        G::cfg.glassBlur, G::cfg.glassTint, G::cfg.glassRadius);
+    return buf;
+}
+// 主题过渡动画也会写 ui::theme()，所以这里始终从「原始调色板」重新套用参数。
+static void refreshGlassPalette() {
+    setPalette(ui::mixTheme(G::themeFrom, currentThemeEntry().palette, ui::easeOutCubic(G::themeProgress)));
+}
+static void refreshGlassLayers() {
+    G::glassCache.reset(); G::glassUnder.reset(); G::glassOver.reset(); G::glassDirty = true;
+    G::dirty = true;
+}
+static void openGlassPicker() {
+    if (G::view != 0 || G::themePicker || G::jumpPicker || G::removeConfirm) return;
+    G::glassPicker = true; G::glassPick = 0; G::dirty = true;
+}
+static void closeGlassPicker() { G::glassPicker = false; G::dirty = true; }
+static void resetGlass() {
+    for (int i = 0; i < GLASS_PARAMS; ++i) *gGlassRows[i].value = 1.0f;
+    saveCfg(); refreshGlassPalette(); refreshGlassLayers(); requestBackdrop();
+    toast(L"玻璃效果已恢复默认");
+}
+static void adjustGlass(int delta) {
+    if (G::glassPick < 0 || G::glassPick >= GLASS_PARAMS) return;
+    auto& row = gGlassRows[G::glassPick];
+    int next = std::clamp(glassStepIndex(row) + delta, 0, row.count - 1);
+    *row.value = row.steps[next];
+    saveCfg(); refreshGlassPalette(); refreshGlassLayers();
+    if (row.needsBackdrop) requestBackdrop();
+    G::dirty = true;
+}
+static void cycleGlass() {
+    if (G::glassPick >= GLASS_PARAMS) { resetGlass(); return; }
+    adjustGlass(1);
+}
+static void drawGlassPicker(Graphics& g) {
+    auto& T = ui::theme();
+    float width = G::W - PADX * 2, height = std::min(440 * S(), (float)G::H - 32 * S());
+    float x = PADX, y = (G::H - height) / 2;
+    G::glassSheet = RectF(x, y, width, height);
+    ui::fillRoundRect(g, ui::Color(0, 0, 0, 150), 0, 0, (float)G::W, (float)G::H, panelRadius());
+    ui::fillRoundRect(g, T.panelTop.withA(250), x, y, width, height, 20 * S());
+    ui::drawRoundRect(g, T.rim, x, y, width, height, 20 * S());
+    ui::TextStyle title; title.size = 18; title.bold = true; title.color = T.text;
+    ui::drawText(g, L"玻璃效果", x + 18 * S(), y + 14 * S(), width - 36 * S(), 30 * S(), title);
+    ui::TextStyle note; note.size = 10.5f; note.color = T.textDim;
+    ui::drawText(g, L"越靠上越接近系统原生的毛玻璃质感", x + 18 * S(), y + 46 * S(), width - 36 * S(), 20 * S(), note);
+    float rowH = (height - 120 * S()) / GLASS_ROWS;
+    G::glassRows.clear();
+    for (int i = 0; i < GLASS_ROWS; ++i) {
+        float rowY = y + 74 * S() + i * rowH;
+        RectF rowRect(x + 12 * S(), rowY, width - 24 * S(), rowH - 4 * S());
+        G::glassRows.push_back(rowRect);
+        bool selected = i == G::glassPick;
+        if (selected) {
+            ui::fillRoundRect(g, T.selBg, rowRect.X, rowRect.Y, rowRect.Width, rowRect.Height, 13 * S());
+            ui::drawRoundRect(g, T.sep, rowRect.X, rowRect.Y, rowRect.Width, rowRect.Height, 13 * S());
+        }
+        if (i < GLASS_PARAMS) {
+            auto& row = gGlassRows[i];
+            ui::TextStyle name; name.size = 13.5f; name.bold = selected; name.color = T.text;
+            ui::drawText(g, row.name, rowRect.X + 12 * S(), rowRect.Y + 3 * S(), rowRect.Width * 0.42f, 20 * S(), name);
+            ui::TextStyle hint; hint.size = 10.0f; hint.color = T.textFaint;
+            ui::drawText(g, row.hint, rowRect.X + 12 * S(), rowRect.Y + 22 * S(), rowRect.Width * 0.6f, 17 * S(), hint);
+            // 档位条：当前档位用主色填充
+            int index = glassStepIndex(row);
+            float barW = rowRect.Width * 0.28f, barX = rowRect.X + rowRect.Width - barW - 12 * S();
+            float barY = rowRect.Y + (rowRect.Height - 6 * S()) / 2;
+            for (int s = 0; s < row.count; ++s) {
+                float segW = (barW - (row.count - 1) * 3 * S()) / row.count;
+                float segX = barX + s * (segW + 3 * S());
+                ui::fillRoundRect(g, s <= index ? T.accentA.withA(selected ? 235 : 170) : T.sep, segX, barY, segW, 6 * S(), 3 * S());
+            }
+            ui::TextStyle value; value.size = 12.5f; value.bold = true; value.color = selected ? T.accentB : T.textDim;
+            value.halign = StringAlignmentFar;
+            ui::drawText(g, glassValueText(row), barX - 54 * S(), rowRect.Y + 6 * S(), 48 * S(), 20 * S(), value);
+        } else {
+            ui::TextStyle reset; reset.size = 13.0f; reset.bold = selected; reset.color = T.textDim;
+            ui::drawText(g, L"恢复默认", rowRect.X + 12 * S(), rowRect.Y, rowRect.Width, rowRect.Height, reset);
+        }
+    }
+    note.halign = StringAlignmentCenter;
+    ui::drawText(g, L"↑↓ 选择参数 · ←→ 调整 · A 下一档 · B 返回", x, y + height - 34 * S(), width, 24 * S(), note);
+}
 static int themePageStart(){return G::themePick/THEME_PAGE_ROWS*THEME_PAGE_ROWS;}
 static RectF themeSheetRect() {
     float height = std::min(410 * S(), (float)G::H - 32 * S());
@@ -541,6 +725,39 @@ static void drawRemoveConfirm(Graphics& g) {
         ui::drawText(g,danger?L"移除  A":L"取消  B",button.X,button.Y,button.Width,button.Height,label);
     }
 }
+static void clipPanelShape(Graphics& g, float w, float h) {
+    GraphicsPath silhouette; ui::roundRectPath(silhouette, 0, 0, w, h, panelRadius());
+    g.SetClip(&silhouette, CombineModeIntersect);
+}
+// 背景模糊 + 主题插画：静态层，只随几何/主题/背景变化。
+static void paintGlassBase(Graphics& g, float w, float h, bool withImage) {
+    auto& T = ui::theme();
+    auto state = g.Save();
+    clipPanelShape(g, w, h);
+    if (G::backdrop) ui::drawImageOpacity(g, G::backdrop, 0, 0, w, h, T.backdropOpacity);
+    // 视频出帧后由视频层顶替插画，保持和旧版一致的优先级。
+    if (withImage && G::themeImage) {
+        float iw = (float)G::themeImage->GetWidth(), ih = (float)G::themeImage->GetHeight();
+        float scale = std::max(w / iw, h / ih);
+        ui::drawImageOpacity(g, G::themeImage.get(), (w - iw * scale) * 0.5f, (h - ih * scale) * 0.5f,
+            iw * scale, ih * scale, currentThemeEntry().imageOpacity);
+    }
+    g.Restore(state);
+}
+// 玻璃渐变 + 顶部光泽 + 边框：静态层，压在动态壁纸之上。
+static void paintGlassTint(Graphics& g, float w, float h) {
+    auto& T = ui::theme();
+    auto state = g.Save();
+    clipPanelShape(g, w, h);
+    LinearGradientBrush br(PointF(0, 0), PointF(0, h), T.glassTop.gd(), T.glassBottom.gd());
+    g.FillRectangle(&br, 0.0f, 0.0f, w, h);
+    BYTE sheenAlpha = (BYTE)std::clamp(24.0f * G::cfg.glassSheen, 0.0f, 120.0f);
+    LinearGradientBrush sheen(PointF(0, 0), PointF(w, h * 0.55f), T.rim.withA(sheenAlpha).gd(), T.rim.withA(0).gd());
+    sheen.SetWrapMode(WrapModeTileFlipXY);
+    g.FillRectangle(&sheen, 0.0f, 0.0f, w, h);
+    g.Restore(state);
+    ui::drawRoundRect(g, T.rim, 0.75f, 0.75f, w - 1.5f, h - 1.5f, panelRadius(), 1.0f + 0.3f * G::cfg.glassSheen);
+}
 static void drawPanel(Graphics& g) {
     auto& T = ui::theme();
     float w = (float)G::W, h = (float)G::H;
@@ -551,45 +768,55 @@ static void drawPanel(Graphics& g) {
         return;
     }
 
-    auto paintGlass=[&](Graphics& g) {
-    auto glassState = g.Save();
-    GraphicsPath silhouette; ui::roundRectPath(silhouette, 0, 0, w, h, 22 * S());
-    g.SetClip(&silhouette, CombineModeIntersect);
-    if (G::backdrop) {
-        ui::drawImageOpacity(g, G::backdrop, 0, 0, w, h, T.backdropOpacity);
-    }
-    if(G::themeImage || G::videoFrame) {
-        // Cover crop with preserved aspect ratio; cached together with the glass.
-        auto image=G::videoFrame?G::videoFrame.get():G::themeImage.get();float iw=(float)image->GetWidth(),ih=(float)image->GetHeight();
-        if(G::videoFrame)g.SetInterpolationMode(InterpolationModeBilinear);
-        float scale=std::max(w/iw,h/ih);
-        if(G::videoFrame){
-            if(!G::videoSurface || G::videoSurface->GetWidth()!=(UINT)G::W || G::videoSurface->GetHeight()!=(UINT)G::H)wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H,currentThemeEntry().videoFit);
-            ui::drawCachedBitmap(g,G::videoSurface.get(),0,0);
-        }
-        else ui::drawImageOpacity(g,image,(w-iw*scale)*0.5f,(h-ih*scale)*0.5f,iw*scale,ih*scale,currentThemeEntry().imageOpacity);
-    }
-    {
-        LinearGradientBrush br(PointF(0, 0), PointF(0, h),
-            T.glassTop.gd(), T.glassBottom.gd());
-        g.FillRectangle(&br, 0.0f, 0.0f, w, h);
-        LinearGradientBrush sheen(PointF(0, 0), PointF(w, h * 0.55f),
-            T.rim.withA(24).gd(), T.rim.withA(0).gd());
-        sheen.SetWrapMode(WrapModeTileFlipXY);
-        g.FillRectangle(&sheen, 0.0f, 0.0f, w, h);
-    }
-    g.Restore(glassState);
-    ui::drawRoundRect(g, T.rim, 0.75f, 0.75f, w - 1.5f, h - 1.5f, 22 * S(), 1.1f);
+    // 动态壁纸已经由解码线程合成成面板尺寸，这里只剩一层贴图（圆角仍要裁一次）。
+    bool paper = G::paperActive && G::videoSurface && G::videoSurface->GetWidth() == (UINT)G::W && G::videoSurface->GetHeight() == (UINT)G::H;
+    auto blitPaper = [&] {
+        if (!paper) return;
+        auto state = g.Save();
+        clipPanelShape(g, w, h);
+        ui::drawCachedBitmap(g, G::videoSurface.get(), 0, 0);
+        g.Restore(state);
     };
-    if(!G::renderCaching || G::themeProgress<1) {G::glassCache.reset();paintGlass(g);}
-    else {
-        if(!G::glassCache || G::glassWidth!=G::W || G::glassHeight!=G::H || G::glassTheme!=G::cfg.theme || G::glassDirty) {
-            if(!G::glassCache || G::glassWidth!=G::W || G::glassHeight!=G::H)G::glassCache=std::make_unique<Bitmap>(G::W,G::H,PixelFormat32bppPARGB);
-            G::glassDirty=false;
-            Graphics background(G::glassCache.get());background.Clear(Gdiplus::Color(0,0,0,0));background.SetSmoothingMode(SmoothingModeHighQuality);paintGlass(background);
-            G::glassWidth=G::W;G::glassHeight=G::H;G::glassTheme=G::cfg.theme;
+    if (!G::renderCaching || G::themeProgress < 1) {
+        paintGlassBase(g, w, h, !paper);
+        blitPaper();
+        paintGlassTint(g, w, h);
+    } else if (!paper) {
+        // 无动态壁纸：两层合成成一张，每帧一次拷贝。
+        if (!G::glassCache || G::glassWidth != G::W || G::glassHeight != G::H || G::glassTheme != G::cfg.theme || G::glassDirty) {
+            if (!G::glassCache || G::glassWidth != G::W || G::glassHeight != G::H) G::glassCache = std::make_unique<Bitmap>(G::W, G::H, PixelFormat32bppPARGB);
+            Graphics background(G::glassCache.get());
+            background.Clear(Gdiplus::Color(0, 0, 0, 0));
+            background.SetSmoothingMode(SmoothingModeHighQuality);
+            paintGlassBase(background, w, h, true);
+            paintGlassTint(background, w, h);
+            G::glassWidth = G::W; G::glassHeight = G::H; G::glassTheme = G::cfg.theme; G::glassDirty = false;
+            ++G::glassRebuilds;
         }
-        ui::drawCachedBitmap(g,G::glassCache.get(),0,0,true);
+        ui::drawCachedBitmap(g, G::glassCache.get(), 0, 0, true);
+    } else {
+        // 动态壁纸：背景层与渐变层各自缓存，视频帧每帧只贴一次图。
+        if (!G::glassUnder || G::glassUnderW != G::W || G::glassUnderH != G::H || G::glassUnderTheme != G::cfg.theme || G::glassDirty) {
+            if (!G::glassUnder || G::glassUnderW != G::W || G::glassUnderH != G::H) G::glassUnder = std::make_unique<Bitmap>(G::W, G::H, PixelFormat32bppPARGB);
+            Graphics under(G::glassUnder.get());
+            under.Clear(Gdiplus::Color(0, 0, 0, 0));
+            under.SetSmoothingMode(SmoothingModeHighQuality);
+            paintGlassBase(under, w, h, false);
+            G::glassUnderW = G::W; G::glassUnderH = G::H; G::glassUnderTheme = G::cfg.theme;
+            ++G::glassRebuilds;
+        }
+        if (!G::glassOver || G::glassOver->GetWidth() != (UINT)G::W || G::glassOver->GetHeight() != (UINT)G::H || G::glassDirty) {
+            if (!G::glassOver || G::glassOver->GetWidth() != (UINT)G::W || G::glassOver->GetHeight() != (UINT)G::H) G::glassOver = std::make_unique<Bitmap>(G::W, G::H, PixelFormat32bppPARGB);
+            Graphics over(G::glassOver.get());
+            over.Clear(Gdiplus::Color(0, 0, 0, 0));
+            over.SetSmoothingMode(SmoothingModeHighQuality);
+            paintGlassTint(over, w, h);
+            ++G::glassRebuilds;
+        }
+        G::glassDirty = false;
+        ui::drawCachedBitmap(g, G::glassUnder.get(), 0, 0, true);
+        blitPaper();
+        ui::drawCachedBitmap(g, G::glassOver.get(), 0, 0);
     }
 
     // ---- 顶部 ----
@@ -761,6 +988,7 @@ static void drawPanel(Graphics& g) {
     }
     if (G::themePicker) drawThemePicker(g);
     if (G::jumpPicker) drawJumpPicker(g);
+    if (G::glassPicker) drawGlassPicker(g);
     if (G::removeConfirm) drawRemoveConfirm(g);
 }
 
@@ -803,25 +1031,105 @@ static void renderFrame() {
 }
 
 // ==================== 显示 / 隐藏 ====================
-static void refreshBackdrop() {
-    G::glassCache.reset();
-    delete G::backdrop; G::backdrop = nullptr;
-    G::backdrop = ui::grabBackdrop(G::PX, G::PY, G::W, G::H, 24, 4);
+constexpr UINT WM_SIDEDECK_BACKDROP = WM_APP + 73;
+// 抓屏+模糊约 25ms，放到后台线程做，结果通过消息回投，不阻塞呼出动画。
+static void requestBackdrop() {
+    if (G::backdropBusy.exchange(true)) return;
+    int x = G::PX, y = G::PY, w = G::W, h = G::H;
+    G::backdropWorker.start(std::thread([x, y, w, h] {
+        int blur = std::clamp((int)lroundf(24.0f * G::cfg.glassBlur), 4, 96);
+        std::unique_ptr<Bitmap> result(ui::grabBackdrop(x, y, w, h, blur, 4));
+        if (result) {
+            std::lock_guard<std::mutex> lock(G::backdropMutex);
+            G::backdropResult = std::move(result);
+            G::backdropResultW = w; G::backdropResultH = h;
+        }
+        G::backdropBusy.store(false);
+        if (G::hwnd) PostMessageW(G::hwnd, WM_SIDEDECK_BACKDROP, 0, 0);
+    }));
+}
+static void applyBackdropResult() {
+    std::unique_ptr<Bitmap> incoming;
+    int w = 0, h = 0;
+    {std::lock_guard<std::mutex> lock(G::backdropMutex);
+     if (!G::backdropResult) return;
+     incoming = std::move(G::backdropResult);
+     w = G::backdropResultW; h = G::backdropResultH;}
+    if (w != G::W || h != G::H) return;   // 几何已经变了，丢弃这次抓屏
+    delete G::backdrop;
+    G::backdrop = incoming.release();
+    G::glassDirty = true; G::dirty = true;
 }
 
+// 屏幕系数：分辨率提供基准，系统缩放可以继续抬高（尊重无障碍设置）。
+// 1080p / 96 DPI -> 1.0；1440p -> 1.35；4K -> 2.05。
+static float screenScaleFor(int monitorHeight, UINT dpi) {
+    float byResolution = (monitorHeight - 48) / 1032.0f;   // 1080p 可用高度为基准
+    float byDpi = dpi / 96.0f * 0.8f;                      // 125% 恰好等于 1.0
+    return std::clamp(std::max(byResolution, byDpi), 0.85f, 2.6f);
+}
+// 逐显示器 DPI：优先 shcore!GetDpiForMonitor，取不到再退回 GetDeviceCaps。
+static UINT monitorDpi(HMONITOR monitor) {
+    typedef HRESULT (WINAPI* GetDpiForMonitorT)(HMONITOR, int, UINT*, UINT*);
+    static GetDpiForMonitorT query = [] {
+        HMODULE module = LoadLibraryExW(L"shcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return module ? (GetDpiForMonitorT)GetProcAddress(module, "GetDpiForMonitor") : (GetDpiForMonitorT)nullptr;
+    }();
+    if (query) { UINT x = 96, y = 96; if (SUCCEEDED(query(monitor, 0 /*MDT_EFFECTIVE_DPI*/, &x, &y)) && x) return x; }
+    HDC screen = GetDC(nullptr);
+    UINT fallback = screen ? (UINT)GetDeviceCaps(screen, LOGPIXELSX) : 96u;
+    if (screen) ReleaseDC(nullptr, screen);
+    return fallback ? fallback : 96u;
+}
 static void computeGeometry() {
     POINT pt{}; GetCursorPos(&pt);
     HMONITOR hm = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{}; mi.cbSize = sizeof(mi);
     GetMonitorInfoW(hm, &mi);
+    float previous = G::screenScale;
+    G::screenScale = screenScaleFor(mi.rcMonitor.bottom - mi.rcMonitor.top, monitorDpi(hm));
+    if (G::screenScale != previous || ui::g_textScale != S()) {
+        // 字号变了，行卡片缓存和玻璃层都要按新尺寸重建。
+        clearRowCache(); G::glassCache.reset(); G::glassUnder.reset(); G::glassOver.reset();
+        ui::g_textScale = S();
+    }
     int sw = mi.rcWork.right - mi.rcWork.left;
     int sh = mi.rcWork.bottom - mi.rcWork.top;
-    int m = std::min(G::cfg.margin, std::min(sw, sh) / 8);
+    int m = std::min((int)lroundf(G::cfg.margin * G::screenScale), std::min(sw, sh) / 8);
     G::H = std::max(1, sh - m * 2);
-    G::W = std::clamp((int)(G::cfg.width * G::cfg.scale), 1, std::max(1, sw - m * 2));
+    G::W = std::clamp((int)lroundf(G::cfg.width * S()), 1, std::max(1, sw - m * 2));
     G::PY = mi.rcWork.top + m;
     G::PX = G::cfg.edge == 1 ? mi.rcWork.left + m : mi.rcWork.right - G::W - m;
 }
+static void applyUiScale(float value) {
+    G::cfg.scale = std::clamp(value, 0.75f, 2.5f);
+    saveCfg();
+    computeGeometry();
+    ensureDib(G::W, G::H);
+    if (G::hwnd) SetWindowPos(G::hwnd, HWND_TOPMOST, G::PX, G::PY, G::W, G::H, SWP_SHOWWINDOW);
+    G::focusReady = false; G::pillReady = false;
+    rebuildTabs();
+    wchar_t buf[96]{};
+    swprintf(buf, 96, L"界面 %.2f 倍 · 屏幕系数 %.2f → 总缩放 %d%%",
+        G::cfg.scale, G::screenScale, (int)lroundf(S() * 100));
+    toast(buf);
+}
+static void cycleUiScale() {
+    const float presets[] = {0.9f, 1.1f, 1.35f, 1.6f, 1.9f, 2.2f};
+    const int count = (int)(sizeof(presets) / sizeof(presets[0]));
+    int current = 0;
+    for (int i = 1; i < count; ++i)
+        if (fabsf(presets[i] - G::cfg.scale) < fabsf(presets[current] - G::cfg.scale)) current = i;
+    // 正好落在某一档就取下一档；自定义值先归到最近的一档。
+    bool exact = fabsf(presets[current] - G::cfg.scale) < 0.001f;
+    applyUiScale(presets[(current + (exact ? 1 : 0)) % count]);
+}
+static std::wstring uiScaleLabel() {
+    wchar_t buf[32]{};
+    swprintf(buf, 32, L"%.2f 倍", G::cfg.scale);
+    return buf;
+}
+
 
 static void showPanel() {
     cancelTouch(G::hwnd);
@@ -834,7 +1142,8 @@ static void showPanel() {
     G::foregroundAtShow = previous;
     computeGeometry();
     ensureDib(G::W, G::H);
-    refreshBackdrop();
+    requestBackdrop();
+    G::video.target(G::W, G::H, currentThemeEntry().videoFit, currentThemeEntry().imageOpacity);
     G::visible = true;
     G::closing = false;
     G::waitForRelease = true;
@@ -886,6 +1195,7 @@ static void hidePanel(bool restoreFocus) {
     G::restoreOnClose = restoreFocus && G::inputFocus.ownsForeground();
     G::themePicker = false;
     G::jumpPicker = false;
+    G::glassPicker = false;
     G::removeConfirm = false; G::removeActions.clear();
     G::holdArmed = false; G::holdButton = 0; G::holdProgress = 0; G::deleteKeyDown = 0;
     G::captureHotkey = false;
@@ -957,6 +1267,14 @@ static void rebuildTabs() {
     appearance.subtitle = currentThemeEntry().name + L" · A 选择";
     appearance.target = L"__theme__"; appearance.kind = lib::Command;
     tools.items.push_back(appearance);
+    Item glass; glass.title = L"玻璃效果";
+    glass.subtitle = glassSummary();
+    glass.target = L"__glass__"; glass.kind = lib::Command;
+    tools.items.push_back(glass);
+    Item zoom; zoom.title = L"界面缩放";
+    zoom.subtitle = L"字号与行高 · 当前 " + uiScaleLabel();
+    zoom.target = L"__uiscale__"; zoom.kind = lib::Command;
+    tools.items.push_back(zoom);
     Item hk; hk.title = L"呼出组合键"; hk.subtitle = L"当前：" + gp::Input::buttonNames((WORD)G::cfg.hotkeyMask);
     hk.target = L"__hotkey__"; hk.kind = lib::Command;
     tools.items.push_back(hk);
@@ -1071,7 +1389,7 @@ static void jumpTo(wchar_t letter) {
 
 static void applyTheme(int id) {
     id = std::clamp(id, 0, themes::count() - 1);
-    G::themeFrom = ui::theme(); G::themeProgress = 0;
+    G::themeFrom = currentThemeEntry().palette; G::themeProgress = 0;
     G::cfg.theme = themes::get(id).base;
     G::cfg.themeFile = themes::get(id).key;
     loadThemeImage();
@@ -1172,6 +1490,7 @@ static void configureIsolation() {
 // ==================== 动作 ====================
 static void openSelected() {
     cancelTouch(G::hwnd);
+    if(G::glassPicker){cycleGlass();return;}
     if(G::jumpPicker){jumpTo(G::jumpLetters[G::jumpIndex]);return;}
     if (G::themePicker) { applyTheme(G::themePick); return; }
     if (G::view == 1) return;
@@ -1186,7 +1505,7 @@ static void openSelected() {
     }
     if (it.target == L"__theme__") {
         G::themePicker = true; themes::reload(themeDirectory());loadThemeImage();
-        ui::theme()=currentThemeEntry().palette;G::themeProgress=1;
+        setPalette(currentThemeEntry().palette);G::themeProgress=1;
         G::themePick = currentTheme(); G::dirty = true; return;
     }
 #ifdef DEBUG_LOG
@@ -1241,6 +1560,8 @@ static void openSelected() {
     }
     if (it.target == L"__rescan__") { rescan(); return; }
     if (it.target == L"__addgames__") { importGames(); return; }
+    if (it.target == L"__uiscale__") { cycleUiScale(); return; }
+    if (it.target == L"__glass__") { openGlassPicker(); return; }
     if (it.target == L"__isolation__") { configureIsolation(); return; }
     if (it.target == L"__opendir__") { ShellExecuteW(nullptr, L"open", lib::appDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); return; }
     if (it.target == L"__openguides__") {
@@ -1273,6 +1594,7 @@ static void openSelected() {
 
 static void navigate(int delta) {
     cancelTouch(G::hwnd);
+    if(G::glassPicker){G::glassPick=std::clamp(G::glassPick+delta,0,GLASS_ROWS-1);G::dirty=true;return;}
     if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta*6,0,26);G::dirty=true;return;}
     if (G::themePicker) {
         G::themePick = std::clamp(G::themePick + delta, 0, themes::count() - 1);
@@ -1306,6 +1628,7 @@ static void navigate(int delta) {
 
 static void switchTab(int delta) {
     cancelTouch(G::hwnd);
+    if(G::glassPicker){adjustGlass(delta>0?1:-1);return;}
     if(G::jumpPicker){G::jumpIndex=std::clamp(G::jumpIndex+delta,0,26);G::dirty=true;return;}
     if (G::view == 1 || G::themePicker) return;
     int n = (int)G::tabs.size();
@@ -1318,6 +1641,7 @@ static void switchTab(int delta) {
 
 static void goBack() {
     cancelTouch(G::hwnd);
+    if(G::glassPicker){closeGlassPicker();return;}
     if(G::jumpPicker){G::jumpPicker=false;G::dirty=true;return;}
     if (G::themePicker) { G::themePicker = false; G::dirty = true; }
     else if (G::view == 1) { G::view = 0; G::dirty = true; G::pageAnim = 0; }
@@ -1342,7 +1666,7 @@ static float listMaximum() {
     return std::max(0.0f,(float)G::tabs[G::tabIndex].items.size()*(ITEM_H+ITEM_GAP)-(listBottom()-listTop()));
 }
 static bool scrollPixels(float distance,bool direct) {
-    if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey || G::themePicker || G::jumpPicker || G::removeConfirm)return false;
+    if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey || G::themePicker || G::jumpPicker || G::glassPicker || G::removeConfirm)return false;
     float previous=0,next=0;
     if(G::view==1) {
         previous=direct?G::readerScroll:G::readerTarget;
@@ -1361,7 +1685,7 @@ static bool scrollPixels(float distance,bool direct) {
 }
 static bool beginTouch(HWND window,float x,float y) {
     if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey)return false;
-    bool eligible=!G::themePicker && !G::jumpPicker && !G::removeConfirm && x>=PADX*0.5f && x<=G::W-PADX*0.5f &&
+    bool eligible=!G::themePicker && !G::jumpPicker && !G::glassPicker && !G::removeConfirm && x>=PADX*0.5f && x<=G::W-PADX*0.5f &&
         y>=(G::view==1 ? HEADER_H+32*S() : listTop()) && y<listBottom();
     bool moving=false;
     if(eligible) {
@@ -1383,6 +1707,21 @@ static bool promotedTouchMouse() {
 constexpr UINT WM_SIDEDECK_TAP=WM_APP+72;
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
+        case WM_DPICHANGED: {
+            // 换显示器或改缩放后重新按 DPI 排版；收起状态下下次呼出会自己重算。
+            if (!G::visible || G::closing) break;
+            computeGeometry();
+            ensureDib(G::W, G::H);
+            SetWindowPos(h, HWND_TOPMOST, G::PX, G::PY, G::W, G::H, SWP_SHOWWINDOW);
+            G::video.target(G::W, G::H, currentThemeEntry().videoFit, currentThemeEntry().imageOpacity);
+            G::focusReady = false; G::pillReady = false;
+            requestBackdrop();
+            G::dirty = true;
+            break;
+        }
+        case WM_SIDEDECK_BACKDROP:
+            applyBackdropResult();
+            return 0;
         case WM_POINTERDOWN:
         case WM_POINTERUPDATE:
         case WM_POINTERUP: {
@@ -1441,6 +1780,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
             if (G::captureHotkey) break;
             if(G::closing || G::dialogOpen)break;
+            if(G::glassPicker) {
+                bool hit=false;
+                for(size_t i=0;i<G::glassRows.size();++i)if(G::glassRows[i].Contains((float)x,(float)y)) {
+                    G::glassPick=(int)i;cycleGlass();hit=true;break;
+                }
+                if(!hit && !G::glassSheet.Contains((float)x,(float)y))closeGlassPicker();
+                break;
+            }
             if(G::removeConfirm) {
                 bool hit=false;
                 for(size_t i=0;i<G::removeActions.size();++i)if(G::removeActions[i].Contains((float)x,(float)y)) {
@@ -1520,7 +1867,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case WM_MOUSEWHEEL: {
             if(!G::visible || G::closing || G::dialogOpen || G::captureHotkey)break;
             int d = ((short)HIWORD(wp)) > 0 ? -1 : 1;
-            if(G::themePicker || G::jumpPicker){navigate(d);break;}
+            if(G::themePicker || G::jumpPicker || G::glassPicker){navigate(d);break;}
             cancelTouch(h);
             scrollPixels(-(float)(short)HIWORD(wp)/WHEEL_DELTA*72*S(),false);
             break;
@@ -1679,7 +2026,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     lib::loadConfig(G::cfg);
     themes::reload(themeDirectory());loadThemeImage();
-    ui::theme() = currentThemeEntry().palette;
+    setPalette(currentThemeEntry().palette);
     ui::g_textScale = G::cfg.scale;
     LOG("config loaded");
     // 首次运行：写一份默认配置 + 示例攻略
@@ -1717,6 +2064,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             }
         }
     }
+    computeGeometry();
     LOG("rebuilding tabs");
     rebuildTabs();
     LOG("tabs ok");
@@ -1837,8 +2185,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (G::nid.hIcon) DestroyIcon(G::nid.hIcon);
     delete G::backdrop;
     G::backdrop = nullptr;
+    // 抓屏线程必须在 GDI+ 关闭前收尾，避免它在 GdiplusShutdown 之后还在建位图。
+    G::backdropWorker.join();
+    {std::lock_guard<std::mutex> lock(G::backdropMutex);G::backdropResult.reset();}
     G::iconCache.clear(); G::imageCache.clear();
-    G::rowCache.clear();G::glassCache.reset();G::video.close();G::videoFrame.reset();G::videoSurface.reset();G::themeImage.reset();ui::fontCache.clear();
+    clearRowCache();G::glassCache.reset();G::glassUnder.reset();G::glassOver.reset();
+    G::video.close();G::videoSurface.reset();G::themeImage.reset();ui::fontCache.clear();
     releaseDib();
     GdiplusShutdown(token);
     CoUninitialize();
@@ -1875,7 +2227,8 @@ static void tickAnim(float elapsed = -1) {
         G::dirty = true;
         if (held >= threshold) openRemoveConfirm();
     }
-    if(G::video.take(G::videoFrame,currentThemeEntry().imageOpacity)){wallpaper::raster(G::videoFrame.get(),G::videoSurface,G::W,G::H,currentThemeEntry().videoFit);G::glassDirty=true;G::dirty=true;}
+    // 解码线程已经把帧合成成面板尺寸，这里只做一次行拷贝；不再让玻璃层失效。
+    if(G::video.take(G::videoSurface)){if(!G::paperActive){G::paperActive=true;G::glassDirty=true;}G::dirty=true;}
     if(FAILED(G::video.error()) && !G::videoErrorShown){G::videoErrorShown=true;toast(L"视频壁纸无法播放，请检查文件或系统媒体组件");}
     ULONGLONG now = GetTickCount64();
     double precise=frameclock::seconds();
@@ -1898,7 +2251,8 @@ static void tickAnim(float elapsed = -1) {
             G::restoreOnClose = false;
             G::visible = false; G::closing = false;
             ShowWindow(G::hwnd, SW_HIDE);
-            G::glassCache.reset();G::rowCache.clear();G::imageCache.clear();
+            G::glassCache.reset();G::glassUnder.reset();G::glassOver.reset();
+            clearRowCache();G::imageCache.clear();
             delete G::backdrop; G::backdrop = nullptr;
             return;
         }
@@ -1907,7 +2261,7 @@ static void tickAnim(float elapsed = -1) {
     if (G::pageAnim < 1) { G::pageAnim = std::min(1.0f, G::pageAnim + dt / 0.20f); need = true; }
     if (G::themeProgress < 1) {
         G::themeProgress = std::min(1.0f, G::themeProgress + dt / 0.28f);
-        ui::theme() = ui::mixTheme(G::themeFrom, currentThemeEntry().palette, ui::easeOutCubic(G::themeProgress));
+        setPalette(ui::mixTheme(G::themeFrom, currentThemeEntry().palette, ui::easeOutCubic(G::themeProgress)));
         need = true;
     }
     if(!G::closing) {
@@ -2078,7 +2432,7 @@ static void tickGamepad() {
     if (pressed & Btn::LB) switchTab(-1);
     if (pressed & Btn::RB) switchTab(1);
     if (G::view == 1 && (pressed & Btn::X)) { cancelTouch(G::hwnd);G::readerTarget = 0; G::dirty = true; }
-    if(G::view==0 && !G::jumpPicker && !G::themePicker) {
+    if(G::view==0 && !G::jumpPicker && !G::themePicker && !G::glassPicker) {
         int direction=G::pad.trigger(gp::RT,idx)>100?1:G::pad.trigger(gp::LT,idx)>100?-1:0;
         if(direction && (direction!=G::triggerDirection || now>=G::triggerRepeat)) {
             navigate(direction*std::max(1,(int)((listBottom()-listTop())/(ITEM_H+ITEM_GAP))));

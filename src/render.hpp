@@ -559,7 +559,7 @@ inline void drawIcon(Graphics& g, Bitmap* bmp, float x, float y, float size, flo
     g.SetClip(&outer, CombineModeReplace);
 }
 
-enum class ToolGlyph { None, Gamepad, Refresh, Folder, Book, Settings };
+enum class ToolGlyph { None, Gamepad, Refresh, Folder, Book, Settings, Scaling, Glass };
 
 // Built-in tools use vector glyphs, independent of Shell file associations and icon fonts.
 inline void drawToolGlyph(Graphics& g, ToolGlyph glyph, float x, float y, float size, bool selected) {
@@ -570,6 +570,8 @@ inline void drawToolGlyph(Graphics& g, ToolGlyph glyph, float x, float y, float 
         case ToolGlyph::Folder: accent = Color(251, 191, 75); break;
         case ToolGlyph::Book: accent = theme().accentB; break;
         case ToolGlyph::Settings: accent = Color(244, 145, 190); break;
+        case ToolGlyph::Scaling: accent = Color(120, 200, 255); break;
+        case ToolGlyph::Glass: accent = Color(150, 230, 220); break;
         default: return;
     }
     accent = accent.lerp(Color(35, 67, 95), std::clamp((128.0f - theme().text.r) / 128.0f, 0.0f, 0.65f));
@@ -626,6 +628,21 @@ inline void drawToolGlyph(Graphics& g, ToolGlyph glyph, float x, float y, float 
         }
         g.DrawPolygon(&pen, points, 48);
         g.DrawEllipse(&pen, 11.5f, 11.5f, 9.0f, 9.0f);
+    } else if (glyph == ToolGlyph::Scaling) {
+        // 界面缩放：外框 + 内框 + 向上箭头
+        g.DrawRectangle(&pen, 5.0f, 15.0f, 22.0f, 12.0f);
+        g.DrawRectangle(&pen, 10.0f, 19.0f, 12.0f, 4.0f);
+        line(16, 4, 16, 12);
+        line(12.5f, 7.5f, 16, 4);
+        line(19.5f, 7.5f, 16, 4);
+    } else if (glyph == ToolGlyph::Glass) {
+        // 玻璃效果：圆角面板 + 斜向高光
+        GraphicsPath panel;
+        roundRectPath(panel, 4.0f, 6.0f, 24.0f, 20.0f, 6.0f);
+        g.DrawPath(&pen, &panel);
+        line(8, 20, 15, 9);
+        SolidBrush brush(accent.gd());
+        g.FillEllipse(&brush, 19.0f, 10.0f, 3.0f, 3.0f);
     }
     g.Restore(state);
 }
