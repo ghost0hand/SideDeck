@@ -100,7 +100,7 @@
 
 `-Configuration` 另支持 `FocusTest`、`InputTest`、`PerfTest` 和 `VideoTest`。
 
-修改 `docs/icon.svg` 后运行 `python tools/make-icon.py`，重新生成 `src/SideDeck.ico` 和 `docs/icon.png`。脚本使用无头 Chrome 渲染 512px 图像，再重采样为 16–256px。
+修改 `docs/icon.svg` 后运行 `python tools/make-icon.py`，重新生成 `src/SideDeck.ico` 和 `docs/icon.png`。
 
 ## 已知限制
 
