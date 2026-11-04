@@ -506,6 +506,20 @@ int main() {
         lib::Config bounds; lib::loadConfig(bounds);
         assert(bounds.theme == 3 && bounds.scale == 0.75f && bounds.width == 320 && bounds.margin == 0);
         DeleteFileW(lib::configPath().c_str());
+        // 开机自启动：命令行转义与 HKCU Run 项的写入、查询、删除。
+        {
+            const wchar_t* testName = L"SideDeckRegression";
+            const std::wstring sample = L"C:\\Program Files\\SideDeck\\SideDeck.exe";
+            assert(::startup::commandFor(sample) == L"\"C:\\Program Files\\SideDeck\\SideDeck.exe\" --startup");
+            assert(::startup::commandFor(L"").empty());
+            assert(::startup::setEnabled(false, testName));
+            assert(!::startup::enabled(testName));
+            assert(::startup::setEnabled(true, testName));
+            assert(::startup::enabled(testName));
+            assert(::startup::readValue(testName) == ::startup::currentCommand());
+            assert(::startup::setEnabled(false, testName));
+            assert(!::startup::enabled(testName));
+        }
         delete G::backdrop; G::backdrop = nullptr;
         // 所有 GDI+ 位图必须在 GdiplusShutdown 之前释放，否则静态析构会崩。
         G::iconCache.clear(); G::imageCache.clear();clearRowCache();
@@ -515,5 +529,5 @@ int main() {
         ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, entry removal, guides and cleanup");
+    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, entry removal, startup, guides and cleanup");
 }

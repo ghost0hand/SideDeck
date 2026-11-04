@@ -29,6 +29,7 @@
 #include "render.hpp"
 #include "gamepad.hpp"
 #include "library.hpp"
+#include "startup.hpp"
 #include "focus_guard.hpp"
 #include "input_bridge.hpp"
 #include "library_index.hpp"
@@ -1316,6 +1317,19 @@ static void rescan() {
 }
 
 static void saveCfg() { lib::saveConfig(G::cfg); }
+static void refreshStartupMenu() {
+    if (!G::hTrayMenu) return;
+    CheckMenuItem(G::hTrayMenu, 1010, MF_BYCOMMAND | (startup::enabled() ? MF_CHECKED : MF_UNCHECKED));
+}
+static void toggleStartup() {
+    bool enable = !startup::enabled();
+    if (!startup::setEnabled(enable)) {
+        toast(L"开机自启动设置失败");
+        return;
+    }
+    refreshStartupMenu();
+    toast(enable ? L"已开启开机自启动" : L"已关闭开机自启动");
+}
 static void toggleFavorite() {
     if(G::view!=0 || G::tabIndex!=0 || G::jumpPicker || G::tabs[0].items.empty())return;
     Item item=G::tabs[0].items[G::sel[0]];
@@ -1927,6 +1941,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 case 1004: ShellExecuteW(nullptr, L"open", lib::appDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
                 case 1005: importGames(); break;
                 case 1008: configureIsolation(); break;
+                case 1010: toggleStartup(); break;
                 case 1009: {
                     G::bridge.stop();G::cfg.inputIsolation=false;saveCfg();G::pad.ignoreIndex(-1);
                     toast(isolation::restore()?L"已恢复真实手柄":L"恢复未完成，请关闭 HidHide 配置工具后重试");rebuildTabs();break;
@@ -1943,6 +1958,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
                 POINT p{}; GetCursorPos(&p);
                 SetForegroundWindow(h);
+                refreshStartupMenu();
                 TrackPopupMenu(G::hTrayMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, p.x, p.y, 0, h, nullptr);
                 PostMessage(h, WM_NULL, 0, 0);
             }
@@ -2120,6 +2136,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         AppendMenuW(G::hTrayMenu, MF_STRING, 1003, L"重新扫描游戏库");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1004, L"打开程序目录");
         AppendMenuW(G::hTrayMenu, MF_STRING, 1007, L"编辑配置");
+        AppendMenuW(G::hTrayMenu, MF_STRING | (startup::enabled() ? MF_CHECKED : 0), 1010, L"开机自启动");
         AppendMenuW(G::hTrayMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(G::hTrayMenu, MF_STRING, 1006, L"退出");
     }
