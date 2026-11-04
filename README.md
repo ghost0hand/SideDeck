@@ -103,10 +103,3 @@
 `-Configuration` 另支持 `FocusTest`、`InputTest`、`PerfTest` 和 `VideoTest`。
 
 修改 `docs/icon.svg` 后运行 `python tools/make-icon.py`，重新生成 `src/SideDeck.ico` 和 `docs/icon.png`。
-
-## 已知限制
-
-- 输入隔离一次仅支持一只 XInput 手柄。
-- 渲染耗时随面板面积增加：本机 1080p 静态主题约 2 ms/帧，4K 动态壁纸约 15 ms/帧。
-
-当前版本见 [VERSION](VERSION)，第三方组件与许可见 [THIRD\_PARTY\_NOTICES.md](THIRD_PARTY_NOTICES.md)。
