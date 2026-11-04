@@ -35,6 +35,7 @@
 #include "library_index.hpp"
 #include "touch_scroll.hpp"
 #include "themes.hpp"
+#include "tray_menu.hpp"
 #include "video_wallpaper.hpp"
 #include "frame_clock.hpp"
 #include "launch_dispatch.hpp"
@@ -163,7 +164,6 @@ BYTE* dibBits = nullptr;
 HDC hdcMem = nullptr;
 int dibW = 0, dibH = 0;
 
-HMENU hTrayMenu = nullptr;
 NOTIFYICONDATAW nid{};
 bool trayAdded = false;
 
@@ -1317,18 +1317,215 @@ static void rescan() {
 }
 
 static void saveCfg() { lib::saveConfig(G::cfg); }
-static void refreshStartupMenu() {
-    if (!G::hTrayMenu) return;
-    CheckMenuItem(G::hTrayMenu, 1010, MF_BYCOMMAND | (startup::enabled() ? MF_CHECKED : MF_UNCHECKED));
-}
 static void toggleStartup() {
     bool enable = !startup::enabled();
     if (!startup::setEnabled(enable)) {
         toast(L"开机自启动设置失败");
         return;
     }
-    refreshStartupMenu();
     toast(enable ? L"已开启开机自启动" : L"已关闭开机自启动");
+}
+
+// ---- 托盘菜单：自绘玻璃弹层，替代系统菜单 ----
+namespace traypopup {
+HWND window = nullptr;
+bool shown = false;
+std::vector<traymenu::Row> rows;
+traymenu::Metrics metrics;
+int selected = 0;
+int x = 0, y = 0;
+HWND previousForeground = nullptr;
+std::wstring version;
+}  // namespace traypopup
+
+static LRESULT CALLBACK TrayPopupProc(HWND window, UINT message, WPARAM wp, LPARAM lp);
+
+static bool ensureTrayPopup() {
+    if (traypopup::window && IsWindow(traypopup::window)) return true;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = TrayPopupProc;
+    wc.hInstance = G::hInst ? G::hInst : GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"SideDeckTrayPopup";
+    RegisterClassExW(&wc);
+    traypopup::window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"SideDeckTrayPopup", L"SideDeck", WS_POPUP, 0, 0, 1, 1,
+        nullptr, nullptr, wc.hInstance, nullptr);
+    return traypopup::window != nullptr;
+}
+
+static void paintTrayPopup() {
+    if (!traypopup::window || !traypopup::shown) return;
+    auto& m = traypopup::metrics;
+    int width = (int)ceilf(m.width), height = (int)ceilf(m.height);
+    if (width <= 0 || height <= 0) return;
+
+    HDC screen = GetDC(nullptr);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dib) { ReleaseDC(nullptr, screen); return; }
+    HDC memory = CreateCompatibleDC(screen);
+    HGDIOBJ old = SelectObject(memory, dib);
+    {
+        Bitmap bitmap(width, height, width * 4, PixelFormat32bppPARGB, (BYTE*)bits);
+        Graphics graphics(&bitmap);
+        graphics.Clear(Color(0, 0, 0, 0));
+        traymenu::draw(graphics, traypopup::rows, m, traypopup::version, traypopup::selected);
+    }
+    POINT point{ traypopup::x, traypopup::y };
+    SIZE size{ width, height };
+    POINT source{ 0, 0 };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(traypopup::window, screen, &point, &size, memory, &source, 0, &blend, ULW_ALPHA);
+    SelectObject(memory, old);
+    DeleteDC(memory);
+    DeleteObject(dib);
+    ReleaseDC(nullptr, screen);
+}
+
+static void hideTrayPopup(bool restoreFocus) {
+    if (!traypopup::shown && !traypopup::window) return;
+    traypopup::shown = false;
+    if (GetCapture() == traypopup::window) ReleaseCapture();
+    if (traypopup::window) ShowWindow(traypopup::window, SW_HIDE);
+    if (restoreFocus && traypopup::previousForeground && IsWindow(traypopup::previousForeground) &&
+        traypopup::previousForeground != traypopup::window)
+        SetForegroundWindow(traypopup::previousForeground);
+    traypopup::previousForeground = nullptr;
+}
+
+static void activateTrayRow(int index) {
+    if (index < 0 || index >= (int)traypopup::rows.size() || traypopup::rows[index].separator) return;
+    int id = traypopup::rows[index].id;
+    if (id == 1010) {
+        // 开关留在菜单里，方便直接看到状态变化。
+        toggleStartup();
+        bool enabled = startup::enabled();
+        for (auto& row : traypopup::rows) if (row.id == 1010) row.check = enabled;
+        traypopup::selected = index;
+        paintTrayPopup();
+        return;
+    }
+    hideTrayPopup(false);
+    if (id) PostMessageW(G::hwnd, WM_COMMAND, (WPARAM)id, 0);
+}
+
+static void showTrayPopup() {
+    if (!ensureTrayPopup()) return;
+    if (traypopup::shown) hideTrayPopup(false);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    traypopup::rows = traymenu::build(G::visible && !G::closing, startup::enabled());
+    HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    GetMonitorInfoW(monitor, &info);
+    // 系统菜单跟随所在显示器的 DPI，不套用侧栏的界面倍率。
+    float scale = std::clamp(monitorDpi(monitor) / 96.0f, 0.95f, 2.2f);
+    traypopup::metrics = traymenu::layout(traypopup::rows, scale);
+    traypopup::selected = traymenu::firstSelectable(traypopup::rows);
+    traypopup::version = std::wstring(L"v") + SIDEDECK_VERSION_W;
+
+    int width = (int)ceilf(traypopup::metrics.width);
+    int height = (int)ceilf(traypopup::metrics.height);
+    int left = info.rcWork.left, top = info.rcWork.top;
+    int right = info.rcWork.right, bottom = info.rcWork.bottom;
+    traypopup::x = cursor.x - width + (int)lroundf(18 * scale);
+    traypopup::y = cursor.y - height - (int)lroundf(6 * scale);
+    traypopup::x = std::clamp(traypopup::x, left, std::max(left, right - width));
+    traypopup::y = std::clamp(traypopup::y, top, std::max(top, bottom - height));
+
+    traypopup::previousForeground = GetForegroundWindow();
+    traypopup::shown = true;
+    SetWindowPos(traypopup::window, HWND_TOPMOST, traypopup::x, traypopup::y, width, height,
+        SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    paintTrayPopup();
+    ShowWindow(traypopup::window, SW_SHOWNOACTIVATE);
+    SetForegroundWindow(traypopup::window);
+    SetFocus(traypopup::window);
+    SetCapture(traypopup::window);
+}
+
+static void shutdownTrayPopup() {
+    hideTrayPopup(false);
+    if (traypopup::window) {
+        DestroyWindow(traypopup::window);
+        traypopup::window = nullptr;
+    }
+}
+
+static LRESULT CALLBACK TrayPopupProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
+    switch (message) {
+        case WM_MOUSEMOVE: {
+            int index = traymenu::rowAt(traypopup::metrics, traypopup::rows,
+                (float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
+            if (index >= 0 && index != traypopup::selected) {
+                traypopup::selected = index;
+                paintTrayPopup();
+            }
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {
+            int index = traymenu::rowAt(traypopup::metrics, traypopup::rows,
+                (float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
+            if (index < 0) {
+                hideTrayPopup(true);
+                return 0;
+            }
+            traypopup::selected = index;
+            paintTrayPopup();
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            int index = traymenu::rowAt(traypopup::metrics, traypopup::rows,
+                (float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
+            if (index >= 0) activateTrayRow(index);
+            else hideTrayPopup(true);
+            return 0;
+        }
+        case WM_RBUTTONUP:
+            hideTrayPopup(true);
+            return 0;
+        case WM_MOUSEWHEEL:
+            return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) { hideTrayPopup(true); return 0; }
+            if (wp == VK_UP || wp == VK_DOWN) {
+                int next = traymenu::moveSelection(traypopup::rows, traypopup::selected,
+                    wp == VK_UP ? -1 : 1);
+                if (next >= 0) { traypopup::selected = next; paintTrayPopup(); }
+                return 0;
+            }
+            if (wp == VK_RETURN || wp == VK_SPACE) {
+                activateTrayRow(traypopup::selected);
+                return 0;
+            }
+            return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(wp) == WA_INACTIVE && traypopup::shown) hideTrayPopup(false);
+            return 0;
+        case WM_CAPTURECHANGED:
+            if (traypopup::shown) hideTrayPopup(false);
+            return 0;
+        case WM_MOUSEACTIVATE:
+            return MA_ACTIVATE;
+        case WM_NCHITTEST:
+            return HTCLIENT;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+        case WM_ERASEBKGND:
+            return 1;
+    }
+    return DefWindowProcW(window, message, wp, lp);
 }
 static void toggleFavorite() {
     if(G::view!=0 || G::tabIndex!=0 || G::jumpPicker || G::tabs[0].items.empty())return;
@@ -1955,12 +2152,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         }
         case WM_TRAYICON: {
-            if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
-                POINT p{}; GetCursorPos(&p);
-                SetForegroundWindow(h);
-                refreshStartupMenu();
-                TrackPopupMenu(G::hTrayMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, p.x, p.y, 0, h, nullptr);
-                PostMessage(h, WM_NULL, 0, 0);
+            if (lp == WM_RBUTTONUP) {
+                showTrayPopup();
+            } else if (lp == WM_LBUTTONUP) {
+                if (G::visible && !G::closing) hidePanel();
+                else showPanel();
             }
             break;
         }
@@ -2126,19 +2322,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         wcsncpy_s(G::nid.szTip, tip.c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_ADD, &G::nid);
         G::trayAdded = true;
-
-        G::hTrayMenu = CreatePopupMenu();
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1001, L"显示面板");
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1002, L"收起面板");
-        AppendMenuW(G::hTrayMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1005, L"批量添加游戏…");
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1008, L"手柄输入隔离 / 恢复…");
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1003, L"重新扫描游戏库");
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1004, L"打开程序目录");
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1007, L"编辑配置");
-        AppendMenuW(G::hTrayMenu, MF_STRING | (startup::enabled() ? MF_CHECKED : 0), 1010, L"开机自启动");
-        AppendMenuW(G::hTrayMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(G::hTrayMenu, MF_STRING, 1006, L"退出");
     }
 
     HANDLE frameTimer=frameclock::create();
@@ -2174,8 +2357,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if(G::launchProcess){CloseHandle(G::launchProcess);G::launchProcess=nullptr;}
     KillTimer(G::hwnd, 1);
     UnregisterHotKey(G::hwnd, 1);
+    shutdownTrayPopup();
     DestroyWindow(G::hwnd);
-    if (G::hTrayMenu) DestroyMenu(G::hTrayMenu);
     // G::nid.hIcon 由 LoadImage(LR_SHARED) 返回，由系统管理，不手动销毁
     delete G::backdrop;
     G::backdrop = nullptr;

@@ -520,6 +520,48 @@ int main() {
             assert(::startup::setEnabled(false, testName));
             assert(!::startup::enabled(testName));
         }
+        // 托盘弹层：布局、跳过分隔线、开关状态与快照。
+        {
+            auto rows = traymenu::build(true, true);
+            auto metrics = traymenu::layout(rows, 1.0f);
+            assert(metrics.width > metrics.cardW && metrics.height > metrics.cardH);
+            auto scaled = traymenu::layout(rows, 1.25f);
+            assert(fabsf(scaled.cardW - metrics.cardW * 1.25f) < 0.01f);
+            int first = traymenu::firstSelectable(rows);
+            assert(first >= 0 && rows[first].id == 1002);
+            int next = traymenu::moveSelection(rows, first, 1);
+            assert(next > first && rows[next].id == 1005);            // 跳过第一处分隔线
+            assert(traymenu::moveSelection(rows, next, -1) == first);
+            assert(traymenu::rowAt(metrics, rows, metrics.hit[first].X + 4, metrics.hit[first].Y + 4) == first);
+            int autostartRow = -1;
+            for (size_t i = 0; i < rows.size(); ++i) if (rows[i].id == 1010) autostartRow = (int)i;
+            assert(autostartRow > 0 && rows[autostartRow].check);
+            auto disabled = traymenu::build(false, false);
+            assert(disabled[0].id == 1001 && disabled[0].label == L"显示面板");
+            assert(!disabled[autostartRow].check);
+
+            const int margin = 24;
+            auto renderMenu = [&](const wchar_t* file, const ui::Theme& palette, bool light) {
+                setPalette(palette);
+                Bitmap canvas((int)metrics.width + margin * 2, (int)metrics.height + margin * 2,
+                    PixelFormat32bppPARGB);
+                {
+                    Graphics g(&canvas);
+                    Color top = light ? Color(255, 232, 241, 249) : Color(255, 28, 40, 56);
+                    Color bottom = light ? Color(255, 158, 184, 206) : Color(255, 8, 13, 20);
+                    LinearGradientBrush background(PointF(0, 0),
+                        PointF((REAL)canvas.GetWidth(), (REAL)canvas.GetHeight()), top, bottom);
+                    g.FillRectangle(&background, 0.0f, 0.0f, (REAL)canvas.GetWidth(), (REAL)canvas.GetHeight());
+                    SolidBrush glow(light ? Color(55, 255, 255, 255) : Color(40, 92, 190, 235));
+                    g.FillEllipse(&glow, -80.0f, -40.0f, 260.0f, 260.0f);
+                    g.TranslateTransform((REAL)margin, (REAL)margin);
+                    traymenu::draw(g, rows, metrics, std::wstring(L"v") + SIDEDECK_VERSION_W, first);
+                }
+                savePng(canvas, root + L"/" + file);
+            };
+            renderMenu(L"tray-menu.png", ui::themePreset(0), false);
+            renderMenu(L"tray-menu-light.png", ui::themePreset(3), true);
+        }
         delete G::backdrop; G::backdrop = nullptr;
         // 所有 GDI+ 位图必须在 GdiplusShutdown 之前释放，否则静态析构会崩。
         G::iconCache.clear(); G::imageCache.clear();clearRowCache();
@@ -529,5 +571,5 @@ int main() {
         ui::fontCache.clear(); releaseDib();
     }
     GdiplusShutdown(token); CoUninitialize();
-    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, entry removal, startup, guides and cleanup");
+    puts("PASS: shortcut launch, child fault isolation, arguments, working directory, safe shortcut icons, theme import, paging, touch, favorites, pinyin, entry removal, startup, tray menu, guides and cleanup");
 }
